@@ -1,0 +1,438 @@
+{
+  "users": {
+    "jonathan": {
+      "username": "jonathan",
+      "xp": 495,
+      "reports_count": 48,
+      "created_at": 1765787525367,
+      "favourites": [
+        "8310B1009801",
+        "8310B1370901",
+        "8460B5237201",
+        "8240IR0015",
+        "8220DB000279",
+        "8310B133631",
+        "8220DB006059",
+        "8310B1010501"
+      ]
+    }
+  },
+  "reports": [
+    {
+      "id": "1765790383767",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790383767,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790384524",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "late",
+      "note": "",
+      "created_at": 1765790384524,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790384687",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "late",
+      "note": "",
+      "created_at": 1765790384687,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790384858",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "late",
+      "note": "",
+      "created_at": 1765790384858,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790385728",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "late",
+      "note": "",
+      "created_at": 1765790385728,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790385902",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "late",
+      "note": "",
+      "created_at": 1765790385902,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790386310",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790386310,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790386474",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790386474,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790386620",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790386620,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790386790",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790386790,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790387166",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "full",
+      "note": "",
+      "created_at": 1765790387166,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790387340",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "full",
+      "note": "",
+      "created_at": 1765790387340,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790387497",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "full",
+      "note": "",
+      "created_at": 1765790387497,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790387664",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "full",
+      "note": "",
+      "created_at": 1765790387664,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790388326",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "early",
+      "note": "",
+      "created_at": 1765790388326,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790388491",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "early",
+      "note": "",
+      "created_at": 1765790388491,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790388665",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "early",
+      "note": "",
+      "created_at": 1765790388665,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790388903",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "early",
+      "note": "",
+      "created_at": 1765790388903,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790389264",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "late",
+      "note": "",
+      "created_at": 1765790389264,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790389478",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "late",
+      "note": "",
+      "created_at": 1765790389478,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790389656",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "late",
+      "note": "",
+      "created_at": 1765790389656,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790389815",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "late",
+      "note": "",
+      "created_at": 1765790389815,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790390111",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790390111,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790390277",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790390277,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790390439",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790390439,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790390608",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790390608,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790390769",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790390769,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790390947",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790390947,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790391110",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790391110,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790391268",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790391268,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790391425",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790391425,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790391593",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790391593,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790391768",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790391768,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790391958",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790391958,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790392160",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790392160,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790392342",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790392342,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790392527",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790392527,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790392705",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790392705,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790392884",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790392884,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790393066",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790393066,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790393255",
+      "username": "jonathan",
+      "stop_id": "8310B1010501",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790393255,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790419650",
+      "username": "jonathan",
+      "stop_id": "8220DB006059",
+      "type": "early",
+      "note": "",
+      "created_at": 1765790419650,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790420120",
+      "username": "jonathan",
+      "stop_id": "8220DB006059",
+      "type": "full",
+      "note": "",
+      "created_at": 1765790420120,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790420547",
+      "username": "jonathan",
+      "stop_id": "8220DB006059",
+      "type": "ghost",
+      "note": "",
+      "created_at": 1765790420547,
+      "upvotes": 0
+    },
+    {
+      "id": "1765790420865",
+      "username": "jonathan",
+      "stop_id": "8220DB006059",
+      "type": "late",
+      "note": "",
+      "created_at": 1765790420865,
+      "upvotes": 0
+    }
+  ],
+  "traffic": [],
+  "stops": [],
+  "routes": [],
+  "journeys": [
+    {
+      "username": "jonathan",
+      "route_short_name": "5241",
+      "route_long_name": "Service",
+      "created_at": 1765790395350
+    }
+  ]
+}

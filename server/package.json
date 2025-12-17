@@ -1,0 +1,19 @@
+{
+  "name": "travelscape-server",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@fastify/cors": "^8.5.0",
+    "@supabase/supabase-js": "^2.88.0",
+    "csv-parser": "^3.2.0",
+    "dotenv": "^16.6.1",
+    "fastify": "^4.29.1",
+    "gtfs-realtime-bindings": "^1.1.1",
+    "lowdb": "^7.0.1",
+    "node-fetch": "^3.3.2"
+  }
+}

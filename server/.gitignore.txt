@@ -1,0 +1,9 @@
+node_modules
+.env
+db.json
+data/stop_times.txt
+data/shapes.txt
+data/static.zip
+gtfs/static/stop_times.txt
+gtfs/static/shapes.txt
+gtfs/static.zip

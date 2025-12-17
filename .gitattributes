@@ -1,3 +1,6 @@
 data/shapes.txt filter=lfs diff=lfs merge=lfs -text
 data/static.zip filter=lfs diff=lfs merge=lfs -text
 data/stop_times.txt filter=lfs diff=lfs merge=lfs -text
+stop_times.txt filter=lfs diff=lfs merge=lfs -text
+shapes.txt filter=lfs diff=lfs merge=lfs -text
+*.zip filter=lfs diff=lfs merge=lfs -text
