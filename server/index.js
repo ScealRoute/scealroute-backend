@@ -98,23 +98,27 @@ async function loadStaticData() {
 }
 
 // --- REAL-TIME FEEDS ---
-// --- REPLACE THE refreshFeeds FUNCTION WITH THIS ---
-
+// --- REPLACE refreshFeeds WITH THIS ---
 async function refreshFeeds() {
     const now = Date.now();
-    if (tripUpdatesCache && (now - lastFetchTime < 10000)) return; 
-
-    const apiKey = process.env.TFI_API_KEY;
-    const tripUrl = process.env.TFI_TRIP_UPDATES_URL || 'https://api.nationaltransport.ie/gtfsr/v2/TripUpdates';
-    const vehUrl = process.env.TFI_VEHICLE_POSITIONS_URL || 'https://api.nationaltransport.ie/gtfsr/v2/VehiclePositions';
-
-    if (!apiKey) { 
-        console.warn("❌ CRITICAL: No TFI_API_KEY found in Environment Variables!"); 
+    // FIX: Check time ONLY. Do not check if tripUpdatesCache exists.
+    // This prevents the "Loop of Doom" if the cache is empty.
+    if (now - lastFetchTime < 30000) { 
+        console.log(`skipping TFI fetch (wait ${(30000 - (now - lastFetchTime))/1000}s)`);
         return; 
     }
 
+    lastFetchTime = now; // Mark time immediately so we don't retry instantly
+    
+    const apiKey = process.env.TFI_API_KEY;
+    // ... URLs remain the same ...
+    const tripUrl = process.env.TFI_TRIP_UPDATES_URL || 'https://api.nationaltransport.ie/gtfsr/v2/TripUpdates';
+    const vehUrl = process.env.TFI_VEHICLE_POSITIONS_URL || 'https://api.nationaltransport.ie/gtfsr/v2/VehiclePositions';
+
+    if (!apiKey) { console.warn("❌ CRITICAL: No TFI_API_KEY"); return; }
+
     try {
-        console.log("⏳ TFI: Fetching live data...");
+        console.log("⏳ TFI: Attempting fetch...");
 
         // 1. TRIP UPDATES
         const uRes = await fetch(tripUrl, { headers: { 'x-api-key': apiKey } });
@@ -122,10 +126,10 @@ async function refreshFeeds() {
             const buffer = await uRes.arrayBuffer();
             tripUpdatesCache = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(new Uint8Array(buffer));
             apiHealthy = true;
-            console.log(`✅ TFI Trips: Success! Loaded ${tripUpdatesCache.entity.length} updates.`);
+            console.log(`✅ TFI Trips: Success (${tripUpdatesCache.entity.length} records)`);
         } else {
-            console.error(`🛑 TFI Trips Failed: HTTP ${uRes.status} - ${uRes.statusText}`);
-            // If this logs 401 or 403, your API Key is invalid or set incorrectly in Render.
+            console.error(`🛑 TFI Trips Blocked: HTTP ${uRes.status}`);
+            // If 429, we just wait. The existing cache (if any) will be used.
         }
 
         // 2. VEHICLE POSITIONS
@@ -133,17 +137,18 @@ async function refreshFeeds() {
         if (vRes.ok) {
             const buffer = await vRes.arrayBuffer();
             vehiclePositionsCache = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(new Uint8Array(buffer));
-            console.log(`✅ TFI Vehicles: Success! Loaded ${vehiclePositionsCache.entity.length} buses.`);
+            console.log(`✅ TFI Vehicles: Success`);
         } else {
-            console.error(`🛑 TFI Vehicles Failed: HTTP ${vRes.status} - ${vRes.statusText}`);
+             console.error(`🛑 TFI Vehicles Blocked: HTTP ${vRes.status}`);
         }
-        
-        lastFetchTime = now;
+
     } catch (e) {
         console.error("🔥 API Network Error:", e.message);
         apiHealthy = false;
     }
 }
+
+
 
 // --- ENDPOINTS ---
 
