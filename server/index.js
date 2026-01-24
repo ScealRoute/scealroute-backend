@@ -98,6 +98,8 @@ async function loadStaticData() {
 }
 
 // --- REAL-TIME FEEDS ---
+// --- REPLACE THE refreshFeeds FUNCTION WITH THIS ---
+
 async function refreshFeeds() {
     const now = Date.now();
     if (tripUpdatesCache && (now - lastFetchTime < 10000)) return; 
@@ -106,24 +108,39 @@ async function refreshFeeds() {
     const tripUrl = process.env.TFI_TRIP_UPDATES_URL || 'https://api.nationaltransport.ie/gtfsr/v2/TripUpdates';
     const vehUrl = process.env.TFI_VEHICLE_POSITIONS_URL || 'https://api.nationaltransport.ie/gtfsr/v2/VehiclePositions';
 
-    if (!apiKey) { console.warn("❌ No TFI_API_KEY"); return; }
+    if (!apiKey) { 
+        console.warn("❌ CRITICAL: No TFI_API_KEY found in Environment Variables!"); 
+        return; 
+    }
 
     try {
+        console.log("⏳ TFI: Fetching live data...");
+
+        // 1. TRIP UPDATES
         const uRes = await fetch(tripUrl, { headers: { 'x-api-key': apiKey } });
         if (uRes.ok) {
             const buffer = await uRes.arrayBuffer();
             tripUpdatesCache = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(new Uint8Array(buffer));
             apiHealthy = true;
+            console.log(`✅ TFI Trips: Success! Loaded ${tripUpdatesCache.entity.length} updates.`);
+        } else {
+            console.error(`🛑 TFI Trips Failed: HTTP ${uRes.status} - ${uRes.statusText}`);
+            // If this logs 401 or 403, your API Key is invalid or set incorrectly in Render.
         }
 
+        // 2. VEHICLE POSITIONS
         const vRes = await fetch(vehUrl, { headers: { 'x-api-key': apiKey } });
         if (vRes.ok) {
             const buffer = await vRes.arrayBuffer();
             vehiclePositionsCache = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(new Uint8Array(buffer));
+            console.log(`✅ TFI Vehicles: Success! Loaded ${vehiclePositionsCache.entity.length} buses.`);
+        } else {
+            console.error(`🛑 TFI Vehicles Failed: HTTP ${vRes.status} - ${vRes.statusText}`);
         }
+        
         lastFetchTime = now;
     } catch (e) {
-        console.error("🔥 API Error:", e.message);
+        console.error("🔥 API Network Error:", e.message);
         apiHealthy = false;
     }
 }
