@@ -15,6 +15,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { loadStatic } from './static.js';
+import { env } from './env.js';
 
 dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '.env') });
 
@@ -22,24 +23,26 @@ const DRY_RUN = process.argv.includes('--dry-run');
 const ONCE = process.argv.includes('--once');
 
 // 3 req/min quota. 25s leaves headroom for a retry without tipping over the limit.
-const POLL_INTERVAL_MS = Number(process.env.RECORDER_POLL_MS || 25_000);
-const FLUSH_INTERVAL_MS = Number(process.env.RECORDER_FLUSH_MS || 120_000);
+const POLL_INTERVAL_MS = Number(env('RECORDER_POLL_MS') || 25_000);
+const FLUSH_INTERVAL_MS = Number(env('RECORDER_FLUSH_MS') || 120_000);
 // Upper bound on how stale a row's last_seen_at may get in the database before it is
 // rewritten even though nothing about it changed.
-const CHECKPOINT_MS = Number(process.env.RECORDER_CHECKPOINT_MS || 900_000);
+const CHECKPOINT_MS = Number(env('RECORDER_CHECKPOINT_MS') || 900_000);
 const BATCH_SIZE = 500;
 
 const TRIP_UPDATES_URL =
-  process.env.TFI_TRIP_UPDATES_URL || 'https://api.nationaltransport.ie/gtfsr/v2/TripUpdates';
+  env('TFI_TRIP_UPDATES_URL', 'https://api.nationaltransport.ie/gtfsr/v2/TripUpdates');
+const TFI_API_KEY = env('TFI_API_KEY');
 
 let supabase = null;
 if (!DRY_RUN) {
-  const { SUPABASE_URL, SUPABASE_KEY } = process.env;
-  if (!SUPABASE_URL || !SUPABASE_KEY) {
+  const url = env('SUPABASE_URL');
+  const key = env('SUPABASE_KEY');
+  if (!url || !key) {
     console.error('Missing SUPABASE_URL or SUPABASE_KEY. Use --dry-run to test without a database.');
     process.exit(1);
   }
-  supabase = createClient(SUPABASE_URL.trim(), SUPABASE_KEY.trim());
+  supabase = createClient(url, key);
 }
 
 // --- in-memory accumulators, keyed so that repeated observations merge rather than duplicate
@@ -90,7 +93,7 @@ async function pollOnce(resolveRoute) {
 
   let res;
   try {
-    res = await fetch(TRIP_UPDATES_URL, { headers: { 'x-api-key': process.env.TFI_API_KEY } });
+    res = await fetch(TRIP_UPDATES_URL, { headers: { 'x-api-key': TFI_API_KEY } });
   } catch (err) {
     stats.failed++;
     pendingPolls.push({ ...poll, http_status: 0, ok: false, duration_ms: Date.now() - startedAt, error: err.message });

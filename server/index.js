@@ -6,7 +6,8 @@ import fs from 'fs';
 import path from 'path';
 import csv from 'csv-parser';
 import { fileURLToPath } from 'url';
-import { createClient } from '@supabase/supabase-js'; 
+import { createClient } from '@supabase/supabase-js';
+import { env } from './recorder/env.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -14,8 +15,8 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 
 // --- SUPABASE ---
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_KEY;
+const supabaseUrl = env('SUPABASE_URL');
+const supabaseKey = env('SUPABASE_KEY');
 if (!supabaseUrl || !supabaseKey) {
     console.error("❌ MISSING SUPABASE CREDENTIALS");
     process.exit(1);
@@ -25,7 +26,7 @@ console.log("✅ Connected to Supabase");
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
-const PORT = process.env.PORT || 8080;
+const PORT = env('PORT', 8080);
 
 // --- DATA CONTAINERS ---
 const realStops = [];
@@ -150,7 +151,7 @@ async function feedFreshness() {
 
 // 1. WEATHER
 app.get('/weather', async (req) => {
-    const apiKey = process.env.OPENWEATHER_API_KEY;
+    const apiKey = env('OPENWEATHER_API_KEY');
     const lat = req.query.lat || 53.3498;
     const lon = req.query.lon || -6.2603;
 
