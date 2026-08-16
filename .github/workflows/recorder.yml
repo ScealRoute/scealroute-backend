@@ -1,0 +1,69 @@
+# Route health recorder, running free on GitHub Actions.
+#
+# The proper home for this is a small always-on worker, where it polls every 25s
+# continuously. This is the zero-cost stand-in: a scheduled job that polls for most of
+# each five-minute window, then flushes and exits.
+#
+# What that costs in quality, stated plainly:
+#   - GitHub's scheduled runners are best-effort and can be delayed by 10+ minutes under
+#     load, so coverage has gaps. `feed_polls` records exactly when we were and were not
+#     watching, which is why that table exists.
+#   - Roughly 10 polls per window rather than a continuous 25s cadence.
+#
+# It is enough to start accruing daily punctuality, which is the point: the feed has no
+# historical archive, so imperfect recording now beats perfect recording later.
+
+name: Route health recorder
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:      # lets you trigger a run by hand to test
+
+concurrency:
+  group: recorder
+  cancel-in-progress: false   # never cut a run short mid-window; let it flush
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      # routes.txt is all the recorder needs and it is only ~41 KB, but it comes out of a
+      # 187 MB archive. Cache it weekly rather than downloading it every five minutes.
+      - id: cache-static
+        uses: actions/cache@v4
+        with:
+          path: server/gtfs/static
+          key: gtfs-static-${{ github.run_id }}
+          restore-keys: gtfs-static-
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - run: npm ci --omit=dev
+        working-directory: server
+
+      - name: Fetch static feed if missing or older than a week
+        working-directory: server
+        run: |
+          if [ ! -f gtfs/static/routes.txt ] || [ -n "$(find gtfs/static/routes.txt -mtime +7 2>/dev/null)" ]; then
+            echo "Fetching current GTFS static feed"
+            node recorder/fetch-static.js
+          else
+            echo "Using cached static feed ($(wc -l < gtfs/static/routes.txt) routes)"
+          fi
+
+      - name: Record
+        working-directory: server
+        env:
+          TFI_API_KEY: ${{ secrets.TFI_API_KEY }}
+          TFI_TRIP_UPDATES_URL: https://api.nationaltransport.ie/gtfsr/v2/TripUpdates
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: node recorder/recorder.js --duration 260

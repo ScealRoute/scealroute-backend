@@ -2,3 +2,12 @@
 
 # macOS
 .DS_Store
+
+# Supabase CLI local state
+supabase/.temp
+
+# GTFS static feed is fetched at build time by server/recorder/fetch-static.js,
+# never committed. The archive is ~187MB and NTA republishes it regularly, so a
+# committed copy goes stale and stops joining to the realtime feed.
+/server/gtfs/static/
+/server/gtfs/static.zip

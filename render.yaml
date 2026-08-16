@@ -1,0 +1,40 @@
+# Render deployment for the route health recorder.
+#
+# The recorder is a background worker, not a web service: it polls the TFI feed on a timer
+# and writes to Postgres. It exposes no HTTP port.
+#
+# IMPORTANT: the TFI quota is 3 requests/minute pooled across every GTFS-RT endpoint on a
+# key. This worker must be the only thing polling with TFI_API_KEY, and it must run at
+# exactly one instance. Scaling it to two would put both over budget and neither would get
+# data. The API no longer polls at all; it reads what this worker writes.
+#
+# The static GTFS feed is fetched at build time rather than committed. NTA republishes
+# regularly and a stale copy stops joining to the realtime feed entirely, which is how the
+# December 2025 snapshot ended up producing guessed route names and no destinations.
+# Redeploy periodically to pick up a fresh feed, or add a Render cron job that triggers a
+# deploy hook.
+
+services:
+  - type: worker
+    name: scealroute-recorder
+    runtime: node
+    plan: starter          # needs to stay always-on; free tier sleeps and would lose data
+    region: frankfurt      # closest Render region to Ireland
+    rootDir: server
+    numInstances: 1        # see the quota note above; do not raise this
+    buildCommand: npm install && node recorder/fetch-static.js
+    startCommand: node recorder/recorder.js
+    autoDeploy: false
+    envVars:
+      - key: TFI_API_KEY
+        sync: false        # set in the Render dashboard, never in this file
+      - key: TFI_TRIP_UPDATES_URL
+        value: https://api.nationaltransport.ie/gtfsr/v2/TripUpdates
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: RECORDER_POLL_MS
+        value: "25000"     # 2.4 req/min, leaves headroom under the 3/min quota
+      - key: RECORDER_FLUSH_MS
+        value: "120000"

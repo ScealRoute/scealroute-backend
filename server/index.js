@@ -6,10 +6,8 @@ import fs from 'fs';
 import path from 'path';
 import csv from 'csv-parser';
 import { fileURLToPath } from 'url';
-import { createClient } from '@supabase/supabase-js'; 
-import GtfsRealtimeBindings from 'gtfs-realtime-bindings';
-import fetch from 'node-fetch';
-import Long from 'long';
+import { createClient } from '@supabase/supabase-js';
+import { env } from './recorder/env.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,8 +15,8 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 
 // --- SUPABASE ---
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_KEY;
+const supabaseUrl = env('SUPABASE_URL');
+const supabaseKey = env('SUPABASE_KEY');
 if (!supabaseUrl || !supabaseKey) {
     console.error("❌ MISSING SUPABASE CREDENTIALS");
     process.exit(1);
@@ -28,24 +26,17 @@ console.log("✅ Connected to Supabase");
 
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
-const PORT = process.env.PORT || 8080;
+const PORT = env('PORT', 8080);
 
 // --- DATA CONTAINERS ---
 const realStops = [];
 const routesList = [];
 const routesById = {};
-let tripUpdatesCache = null;
-let vehiclePositionsCache = null;
-let lastFetchTime = 0;
-let apiHealthy = false;
+const tripHeadsigns = {}; // tripId → headsign
 
-function safeLongToNumber(longVal) {
-    if (!longVal) return null;
-    if (typeof longVal === 'number') return longVal;
-    if (Long.isLong(longVal)) return longVal.toNumber();
-    if (longVal.low !== undefined) return new Long(longVal.low, longVal.high, longVal.unsigned).toNumber();
-    return null;
-}
+// Route naming now happens in the recorder, which writes route_short_name alongside each
+// observation. Parsing it here as well would be a second, divergent implementation of the
+// same guesswork.
 
 // --- HELPER: CALCULATE ROUTE STATUS (RESTORED) ---
 function calculateStopStatus(reportCount) {
@@ -95,57 +86,63 @@ async function loadStaticData() {
           }
       }).on('end', () => resolve());
   });
+
+  // TRIP HEADSIGNS
+  await new Promise(resolve => {
+      const p = path.join(__dirname, 'gtfs', 'static', 'trips.txt');
+      if (!fs.existsSync(p)) return resolve();
+      fs.createReadStream(p).pipe(csv()).on('data', r => {
+          if (r.trip_id && r.trip_headsign) {
+              tripHeadsigns[r.trip_id] = r.trip_headsign;
+          }
+      }).on('end', () => { console.log(`✅ Loaded ${Object.keys(tripHeadsigns).length} trip headsigns.`); resolve(); });
+  });
 }
 
 // --- REAL-TIME FEEDS ---
-// --- REPLACE refreshFeeds WITH THIS ---
-async function refreshFeeds() {
-    const now = Date.now();
-    // FIX: Check time ONLY. Do not check if tripUpdatesCache exists.
-    // This prevents the "Loop of Doom" if the cache is empty.
-    if (now - lastFetchTime < 30000) { 
-        console.log(`skipping TFI fetch (wait ${(30000 - (now - lastFetchTime))/1000}s)`);
-        return; 
-    }
+//
+// This server no longer fetches from TFI. The recorder (server/recorder) is the single
+// poller and this reads what it wrote.
+//
+// The TFI quota is 3 requests/minute pooled across every GTFS-RT endpoint on the key.
+// The old refreshFeeds() fetched two endpoints behind one 30s gate, which is 4 req/min,
+// so it was permanently over budget on its own. Running it alongside the recorder starved
+// both and neither got data.
+//
+// Reading from the database also removes the per-request full-feed scan, and means this
+// API can run on any number of instances without touching the quota at all.
 
-    lastFetchTime = now; // Mark time immediately so we don't retry instantly
-    
-    const apiKey = process.env.TFI_API_KEY;
-    // ... URLs remain the same ...
-    const tripUrl = process.env.TFI_TRIP_UPDATES_URL || 'https://api.nationaltransport.ie/gtfsr/v2/TripUpdates';
-    const vehUrl = process.env.TFI_VEHICLE_POSITIONS_URL || 'https://api.nationaltransport.ie/gtfsr/v2/VehiclePositions';
+const FEED_STALE_AFTER_MS = 3 * 60 * 1000;
 
-    if (!apiKey) { console.warn("❌ CRITICAL: No TFI_API_KEY"); return; }
+/** Service date, not calendar date. Must match the recorder's definition exactly. */
+function serviceDateFor(date = new Date()) {
+    const d = new Date(date);
+    if (d.getHours() < 4) d.setDate(d.getDate() - 1);
+    return d.toISOString().slice(0, 10);
+}
 
-    try {
-        console.log("⏳ TFI: Attempting fetch...");
+/**
+ * Freshness of the recorded data, so arrivals can be labelled honestly.
+ * The old code set apiHealthy=true on success and only ever cleared it on a thrown
+ * network error, so a 429 left stale cache being served as "LIVE" indefinitely.
+ */
+async function feedFreshness() {
+    const { data } = await supabase
+        .from('feed_polls')
+        .select('polled_at, feed_timestamp, ok')
+        .eq('ok', true)
+        .order('polled_at', { ascending: false })
+        .limit(1);
 
-        // 1. TRIP UPDATES
-        const uRes = await fetch(tripUrl, { headers: { 'x-api-key': apiKey } });
-        if (uRes.ok) {
-            const buffer = await uRes.arrayBuffer();
-            tripUpdatesCache = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(new Uint8Array(buffer));
-            apiHealthy = true;
-            console.log(`✅ TFI Trips: Success (${tripUpdatesCache.entity.length} records)`);
-        } else {
-            console.error(`🛑 TFI Trips Blocked: HTTP ${uRes.status}`);
-            // If 429, we just wait. The existing cache (if any) will be used.
-        }
+    const last = data?.[0];
+    if (!last) return { fresh: false, ageSeconds: null, lastPollAt: null };
 
-        // 2. VEHICLE POSITIONS
-        const vRes = await fetch(vehUrl, { headers: { 'x-api-key': apiKey } });
-        if (vRes.ok) {
-            const buffer = await vRes.arrayBuffer();
-            vehiclePositionsCache = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(new Uint8Array(buffer));
-            console.log(`✅ TFI Vehicles: Success`);
-        } else {
-             console.error(`🛑 TFI Vehicles Blocked: HTTP ${vRes.status}`);
-        }
-
-    } catch (e) {
-        console.error("🔥 API Network Error:", e.message);
-        apiHealthy = false;
-    }
+    const ageMs = Date.now() - new Date(last.feed_timestamp || last.polled_at).getTime();
+    return {
+        fresh: ageMs < FEED_STALE_AFTER_MS,
+        ageSeconds: Math.round(ageMs / 1000),
+        lastPollAt: last.polled_at,
+    };
 }
 
 
@@ -154,7 +151,7 @@ async function refreshFeeds() {
 
 // 1. WEATHER
 app.get('/weather', async (req) => {
-    const apiKey = process.env.OPENWEATHER_API_KEY;
+    const apiKey = env('OPENWEATHER_API_KEY');
     const lat = req.query.lat || 53.3498;
     const lon = req.query.lon || -6.2603;
 
@@ -176,60 +173,64 @@ app.get('/weather', async (req) => {
 });
 
 // 2. LIVE ARRIVALS + ROUTE RATING
+//
+// Served from what the recorder wrote, not from a feed fetch on the request path.
+// Stop ids in the realtime feed match the static ids exactly, so the old suffix-matching
+// fallback is gone: it could attach another stop's arrivals to this one, which is a worse
+// failure than showing nothing.
 app.get('/stops/:id/arrivals', async (req) => {
-    await refreshFeeds();
-    const stopId = req.params.id; 
-    const arrivals = [];
+    const stopId = req.params.id;
     const now = Date.now();
-    const targetSuffix = stopId.length > 4 ? stopId.slice(-4) : stopId;
 
-    if (apiHealthy && tripUpdatesCache?.entity) {
-        tripUpdatesCache.entity.forEach(entity => {
-            if (entity.tripUpdate?.stopTimeUpdate) {
-                const trip = entity.tripUpdate;
-                let cleanRoute = trip.trip.routeId || '';
-                if (cleanRoute.includes('-')) cleanRoute = cleanRoute.split('-')[1];
+    const [{ data: observations }, { data: reports }, freshness] = await Promise.all([
+        supabase
+            .from('stop_observations')
+            .select('trip_id, route_id, route_short_name, mode, last_predicted_time, last_delay_seconds, last_seen_at')
+            .eq('service_date', serviceDateFor())
+            .eq('stop_id', stopId)
+            .order('last_predicted_time', { ascending: true, nullsFirst: false })
+            .limit(60),
+        supabase
+            .from('reports')
+            .select('*')
+            .eq('stop_id', stopId)
+            .gt('created_at', new Date(now - 3600000).toISOString()),
+        feedFreshness(),
+    ]);
 
-                trip.stopTimeUpdate.forEach(stopUpdate => {
-                    const apiStopId = stopUpdate.stopId || "";
-                    const isMatch = apiStopId === stopId || apiStopId.endsWith(targetSuffix) || stopId.endsWith(apiStopId);
+    const arrivals = (observations || [])
+        // Only forward-looking arrivals. A small grace window keeps a bus that is just
+        // due from vanishing off the board.
+        .filter(o => o.last_predicted_time && new Date(o.last_predicted_time).getTime() > now - 120000)
+        .map(o => {
+            const headsign = tripHeadsigns[o.trip_id] || null;
+            const label = o.route_short_name || o.route_id || 'Service';
+            return {
+                route_short_name: label,
+                destination: headsign || label,
+                predicted_time: new Date(o.last_predicted_time).getTime(),
+                delay_seconds: o.last_delay_seconds,
+                trip_id: o.trip_id,
+                mode: o.mode,
+                // Honest, not asserted. Freshness is measured from the last successful poll.
+                status: freshness.fresh ? 'LIVE' : 'STALE',
+            };
+        })
+        .sort((a, b) => a.predicted_time - b.predicted_time)
+        .slice(0, 10);
 
-                    if (isMatch) {
-                        const timeSec = safeLongToNumber(stopUpdate.arrival?.time) || safeLongToNumber(stopUpdate.departure?.time);
-                        if (timeSec) {
-                            const arrivalMs = timeSec * 1000;
-                            if (arrivalMs > now - 3600000) {
-                                arrivals.push({
-                                    route_short_name: cleanRoute, 
-                                    destination: 'City Centre', 
-                                    predicted_time: arrivalMs, 
-                                    trip_id: trip.trip.tripId,
-                                    status: 'LIVE'
-                                });
-                            }
-                        }
-                    }
-                });
-            }
-        });
-    }
-    
-    arrivals.sort((a, b) => a.predicted_time - b.predicted_time);
-
-    // FETCH REPORTS & CALCULATE CHAOS RATING
-    const { data: reports } = await supabase
-        .from('reports')
-        .select('*')
-        .eq('stop_id', stopId)
-        .gt('created_at', new Date(Date.now() - 3600000).toISOString()); // Last hour only
-    
     const status = calculateStopStatus(reports ? reports.length : 0);
 
-    return { 
-        arrivals: arrivals.slice(0, 10), 
-        reports: reports || [], 
-        status: status, // <--- Returns { status: 'Chaos', color: 'red' }
-        lastUpdated: now 
+    return {
+        arrivals,
+        reports: reports || [],
+        status,
+        feed: {
+            fresh: freshness.fresh,
+            age_seconds: freshness.ageSeconds,
+            last_poll_at: freshness.lastPollAt,
+        },
+        lastUpdated: now,
     };
 });
 
@@ -243,61 +244,35 @@ app.get('/routes/search', async (req) => {
     return routesList.filter(r => (r.short_name||'').toLowerCase().includes(q) || (r.long_name||'').toLowerCase().includes(q)).slice(0,50);
 });
 
-// 4. VEHICLES
-const handleRouteVehicles = async (req) => {
-    await refreshFeeds();
-    let queryId = req.params?.id || req.query?.route_id || '';
-    let shortName = routesById[queryId] || queryId;
-    if (shortName.includes('_')) shortName = shortName.split('_')[0];
-    if (shortName.includes('-')) shortName = shortName.split('-')[1];
-    shortName = shortName.toUpperCase();
-
-    const vehicles = [];
-    if (vehiclePositionsCache?.entity) {
-        vehiclePositionsCache.entity.forEach(e => {
-            if (e.vehicle?.position) {
-                const v = e.vehicle;
-                let routeName = v.trip?.routeId || '';
-                if(routeName.includes('-')) routeName = routeName.split('-')[1];
-                if (routeName.toUpperCase() === shortName) {
-                     vehicles.push({
-                        id: v.id || v.trip?.tripId || `bus_${Math.random()}`,
-                        latitude: v.position.latitude, 
-                        longitude: v.position.longitude,
-                        route: routeName,
-                        bearing: v.position.bearing || 0
-                    });
-                }
-            }
-        });
-    }
-    return { vehicles };
-};
-app.get('/route-vehicles', handleRouteVehicles);
-app.get('/routes/:id/vehicles', handleRouteVehicles);
-
-app.get('/vehicles', async () => {
-    await refreshFeeds();
-    const vehicles = [];
-    if (vehiclePositionsCache?.entity) {
-        vehiclePositionsCache.entity.slice(0, 200).forEach(e => {
-            if (e.vehicle?.position) {
-                const safeId = e.vehicle.id || e.vehicle.trip?.tripId || `bus_${Math.random()}`;
-                let routeName = e.vehicle.trip?.routeId || 'Bus';
-                if(routeName.includes('-')) routeName = routeName.split('-')[1];
-                vehicles.push({ id: safeId, latitude: e.vehicle.position.latitude, longitude: e.vehicle.position.longitude, route: routeName });
-            }
-        });
-    }
-    return { vehicles };
+// 4. VEHICLES — retired
+//
+// Live vehicle positions are no longer served. Two reasons, in order of weight:
+//
+//   1. Coverage. The VehiclePositions feed carries roughly 878 vehicles against 2,149
+//      live trips, so about three in five buses running have no GPS position at all.
+//      A map that silently omits most of the fleet misleads more than it informs.
+//   2. Quota. Polling it costs requests from the same 3/min budget the recorder needs,
+//      and arrival times matter more to a passenger than a moving dot.
+//
+// The endpoints stay so existing app builds keep working rather than erroring; they
+// return an empty list and say why.
+const retiredVehiclesEndpoint = async () => ({
+    vehicles: [],
+    retired: true,
+    reason: 'Live vehicle positions are not served: the TFI feed covers only ~41% of running trips.',
 });
+app.get('/route-vehicles', retiredVehiclesEndpoint);
+app.get('/routes/:id/vehicles', retiredVehiclesEndpoint);
+app.get('/vehicles', retiredVehiclesEndpoint);
 
 // 5. USER & FAVOURITES
 async function getOrCreateUser(username) {
     const clean = String(username).trim();
-    const { data } = await supabase.from('users').select('*').eq('username', clean).single();
+    const { data, error } = await supabase.from('users').select('*').eq('username', clean).single();
+    if (error && error.code !== 'PGRST116') console.error('❌ Supabase select user error:', error.message);
     if (data) return data;
-    const { data: newUser } = await supabase.from('users').insert({ username: clean, favourites: [], xp: 0 }).select().single();
+    const { data: newUser, error: insertError } = await supabase.from('users').insert({ username: clean, favourites: [], xp: 0 }).select().single();
+    if (insertError) console.error('❌ Supabase insert user error:', insertError.message);
     return newUser || { username: clean, favourites: [], xp: 0 };
 }
 app.get('/users/:username/favourites', async (req) => {
@@ -310,7 +285,8 @@ app.post('/users/:username/favourites', async (req) => {
     let newFavs = u.favourites || [];
     if (favourite) { if (!newFavs.includes(stop_id)) newFavs.push(stop_id); } 
     else { newFavs = newFavs.filter(id => id !== stop_id); }
-    await supabase.from('users').update({ favourites: newFavs }).eq('username', u.username);
+    const { error: updateError } = await supabase.from('users').update({ favourites: newFavs }).eq('username', u.username);
+    if (updateError) console.error('❌ Supabase update favourites error:', updateError.message);
     return { ok: true, favourites: newFavs };
 });
 
@@ -369,18 +345,99 @@ app.post('/stops/by-ids', async (req) => { return realStops.filter(s => (req.bod
 app.get('/stops/nearby', async (req) => {
     const lat = parseFloat(req.query.lat); const lon = parseFloat(req.query.lon);
     if (!realStops.length) return [];
-    const sorted = [...realStops].sort((a, b) => ((a.stop_lat - lat)**2 + (a.stop_lon - lon)**2) - ((b.stop_lat - lat)**2 + (b.stop_lon - lon)**2));
+    const delta = 0.05; // ~5km bounding box pre-filter before expensive sort
+    const candidates = realStops.filter(s => Math.abs(s.stop_lat - lat) < delta && Math.abs(s.stop_lon - lon) < delta);
+    const pool = candidates.length > 0 ? candidates : realStops;
+    const sorted = pool.sort((a, b) => ((a.stop_lat - lat)**2 + (a.stop_lon - lon)**2) - ((b.stop_lat - lat)**2 + (b.stop_lon - lon)**2));
     return sorted.slice(0, 30);
 });
 app.get('/stops/heat', async () => { return { ok: true, heat: {} }; });
 app.get('/health', async () => ({ ok: true }));
 
+// 7. JOURNEYS
+app.post('/journeys/start', async (req) => {
+    const { username, route_short_name, route_long_name } = req.body;
+    await supabase.from('journeys').insert({ username, route_short_name, route_long_name });
+    return { ok: true };
+});
+app.get('/users/:username/journeys', async (req) => {
+    const { data } = await supabase.from('journeys').select('*').eq('username', req.params.username).order('created_at', { ascending: false });
+    return { ok: true, journeys: data || [] };
+});
+
+// 8. ALERTS
+app.get('/users/:username/alerts', async (req) => {
+    const { data } = await supabase.from('alerts').select('*').eq('username', req.params.username);
+    return { ok: true, alerts: data || [] };
+});
+app.post('/alerts/register', async (req) => {
+    const { username, stop_id, route_id, threshold_minutes } = req.body;
+    const { data } = await supabase.from('alerts').insert({ username, stop_id, route_id, threshold_minutes }).select().single();
+    return { ok: true, alert: data };
+});
+app.post('/alerts/:id/cancel', async (req) => {
+    await supabase.from('alerts').delete().eq('id', req.params.id);
+    return { ok: true };
+});
+
+// 9. STOP REVIEWS
+app.get('/stops/:id/reviews', async (req) => {
+    const { data } = await supabase
+        .from('stop_reviews')
+        .select('*')
+        .eq('stop_id', req.params.id)
+        .order('created_at', { ascending: false })
+        .limit(20);
+
+    const reviews = data || [];
+
+    // Aggregate stats
+    const count = reviews.length;
+    const avgOverall = count ? (reviews.reduce((s, r) => s + (r.overall || 0), 0) / count).toFixed(1) : null;
+
+    const mode = (arr, field) => {
+        const freq = {};
+        arr.forEach(r => { if (r[field]) freq[r[field]] = (freq[r[field]] || 0) + 1; });
+        return Object.keys(freq).sort((a, b) => freq[b] - freq[a])[0] || null;
+    };
+
+    return {
+        ok: true,
+        reviews,
+        summary: {
+            count,
+            avg_overall: avgOverall,
+            busyness: mode(reviews, 'busyness'),
+            shelter: mode(reviews, 'shelter'),
+            condition: mode(reviews, 'condition'),
+        }
+    };
+});
+
+app.post('/stops/:id/reviews', async (req) => {
+    const { username, overall, busyness, shelter, condition, note } = req.body;
+    const stop_id = req.params.id;
+
+    const { data, error } = await supabase
+        .from('stop_reviews')
+        .insert({ stop_id, username, overall, busyness, shelter, condition, note })
+        .select()
+        .single();
+
+    if (error) console.error('❌ Supabase insert review error:', error.message);
+
+    // Award XP for reviewing
+    const u = await getOrCreateUser(username);
+    const newXp = (u.xp || 0) + 5;
+    await supabase.from('users').update({ xp: newXp }).eq('username', username);
+
+    return { ok: true, review: data };
+});
+
 // START
 const start = async () => {
   try {
     await loadStaticData();
-    console.log("⚡ Startup: Checking TFI...");
-    await refreshFeeds(); 
     await app.listen({ port: PORT, host: '0.0.0.0' });
     console.log(`\n🚀 ScealRoute Server (Production) running on ${PORT}`);
   } catch (err) { console.error(err); process.exit(1); }
