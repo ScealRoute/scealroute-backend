@@ -4,7 +4,9 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "recorder": "node recorder/recorder.js",
+    "fetch-static": "node recorder/fetch-static.js"
   },
   "dependencies": {
     "@fastify/cors": "^8.5.0",
@@ -12,9 +14,7 @@
     "csv-parser": "^3.2.0",
     "dotenv": "^16.6.1",
     "fastify": "^4.29.1",
-    "gtfs-realtime-bindings": "^1.1.1",
-    "node-fetch": "^3.3.2",
-    "long": "^5.2.3"
+    "gtfs-realtime-bindings": "^1.1.1"
   },
   "engines": {
     "node": ">=18.0.0"
