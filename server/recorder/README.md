@@ -55,6 +55,25 @@ Roughly 500k stop observation rows per day nationally. Partition or apply the re
 window in `schema.sql` once a comfortable history exists; the rollup is the durable part
 and raw rows exist so it can be recomputed.
 
+### Write volume
+
+Row count is not the same as write volume. Around 13,000 stop events are in flight at any
+moment, and a naive recorder would rewrite all of them on every flush.
+
+Measured against the live feed: **about 97% of stop events are identical between
+consecutive polls.** Only 3% change delay or predicted time, plus roughly 200 genuinely new
+events per 30 seconds. So the recorder marks a row dirty only when something meaningful
+changed.
+
+Observed effect in a live soak: the first flush after startup writes everything (11,686
+rows, correctly, since it is all new), and the next steady-state flush writes **777 rows
+instead of 11,920**. Trip rows drop from 2,011 to 6.
+
+`last_seen_at` still needs to be reasonably fresh, because a trip's disappearance from the
+feed is the signal a non-appearance is derived from. `RECORDER_CHECKPOINT_MS` (default 15
+minutes) bounds how stale it can get: any row untouched for longer is rewritten even if
+nothing changed.
+
 ## Design notes
 
 **`stop_times.txt` is deliberately not loaded.** It is 536 MB and 10.2M rows, and it is not

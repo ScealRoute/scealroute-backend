@@ -24,6 +24,9 @@ const ONCE = process.argv.includes('--once');
 // 3 req/min quota. 25s leaves headroom for a retry without tipping over the limit.
 const POLL_INTERVAL_MS = Number(process.env.RECORDER_POLL_MS || 25_000);
 const FLUSH_INTERVAL_MS = Number(process.env.RECORDER_FLUSH_MS || 120_000);
+// Upper bound on how stale a row's last_seen_at may get in the database before it is
+// rewritten even though nothing about it changed.
+const CHECKPOINT_MS = Number(process.env.RECORDER_CHECKPOINT_MS || 900_000);
 const BATCH_SIZE = 500;
 
 const TRIP_UPDATES_URL =
@@ -45,6 +48,7 @@ const tripObs = new Map();   // `${serviceDate}|${tripId}`           -> row
 const pendingPolls = [];
 const dirtyStops = new Set();
 const dirtyTrips = new Set();
+const writtenAt = new Map(); // key -> ms of last successful persist, for staleness checkpointing
 
 const stats = { polls: 0, ok: 0, rateLimited: 0, failed: 0, flushed: 0, flushErrors: 0 };
 
@@ -139,10 +143,13 @@ async function pollOnce(resolveRoute) {
       };
       tripObs.set(tKey, trip);
     }
+    const tripIsNew = trip.poll_count === 0;
+    const tripChanged = sr !== null && sr !== trip.schedule_relationship;
+    const tripStale = (Date.now() - (writtenAt.get(tKey) || 0)) > CHECKPOINT_MS;
     trip.last_seen_at = now;
     trip.poll_count++;
     if (sr !== null) trip.schedule_relationship = sr;
-    dirtyTrips.add(tKey);
+    if (tripIsNew || tripChanged || tripStale) dirtyTrips.add(tKey);
 
     for (const su of tu.stopTimeUpdate || []) {
       const stopId = su.stopId;
@@ -179,7 +186,24 @@ async function pollOnce(resolveRoute) {
           last_delay_seconds: delay,
         };
         stopObs.set(key, row);
+        dirtyStops.add(key);
+      } else {
+        // Measured against the live feed: ~97% of stop events are byte-identical between
+        // consecutive polls. Marking every re-observation dirty would write ~13k rows per
+        // flush where ~560 carry new information, so only a real change earns a write.
+        const predictedIso = iso(predictedMs);
+        const changed =
+          (predictedMs !== null && predictedIso !== row.last_predicted_time) ||
+          (delay !== null && delay !== row.last_delay_seconds);
+
+        // last_seen_at still needs bounded staleness, because "when did we stop seeing
+        // this trip" is the signal a non-appearance is derived from. Checkpoint any row
+        // that has gone too long without being persisted.
+        const stale = (Date.now() - (writtenAt.get(key) || 0)) > CHECKPOINT_MS;
+
+        if (changed || stale) dirtyStops.add(key);
       }
+
       row.last_seen_at = now;
       row.observation_count++;
       if (predictedMs !== null) row.last_predicted_time = iso(predictedMs);
@@ -187,7 +211,6 @@ async function pollOnce(resolveRoute) {
         row.last_delay_seconds = delay;
         if (row.first_delay_seconds === null) row.first_delay_seconds = delay;
       }
-      dirtyStops.add(key);
     }
   }
 
@@ -207,6 +230,9 @@ async function pollOnce(resolveRoute) {
 async function flush() {
   if (DRY_RUN) {
     console.log(`[dry-run] would flush ${dirtyStops.size} stop rows, ${dirtyTrips.size} trip rows, ${pendingPolls.length} poll rows`);
+    const stamp = Date.now();
+    for (const k of dirtyStops) writtenAt.set(k, stamp);
+    for (const k of dirtyTrips) writtenAt.set(k, stamp);
     dirtyStops.clear();
     dirtyTrips.clear();
     pendingPolls.length = 0;
@@ -236,6 +262,13 @@ async function flush() {
         console.error(`flush error on ${table}: ${error.message}`);
       } else {
         stats.flushed += batch.length;
+        const stamp = Date.now();
+        for (const r of batch) {
+          const k = table === 'stop_observations'
+            ? `${r.service_date}|${r.trip_id}|${r.stop_id}`
+            : `${r.service_date}|${r.trip_id}`;
+          writtenAt.set(k, stamp);
+        }
       }
     }
   }
@@ -257,6 +290,9 @@ function pruneOldServiceDays() {
   }
   for (const key of tripObs.keys()) {
     if (!key.startsWith(`${today}|`)) tripObs.delete(key);
+  }
+  for (const key of writtenAt.keys()) {
+    if (!key.startsWith(`${today}|`)) writtenAt.delete(key);
   }
   if (dropped) console.log(`pruned ${dropped} stop events from previous service days`);
 }
