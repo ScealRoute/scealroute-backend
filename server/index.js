@@ -34,10 +34,23 @@ const PORT = process.env.PORT || 8080;
 const realStops = [];
 const routesList = [];
 const routesById = {};
+const tripHeadsigns = {}; // tripId → headsign
 let tripUpdatesCache = null;
 let vehiclePositionsCache = null;
 let lastFetchTime = 0;
 let apiHealthy = false;
+
+function extractRouteNumber(raw) {
+    if (!raw) return 'Bus';
+    const tokens = raw.split(/[\s\-_]+/);
+    // Prefer tokens that look like a bus route: digits + optional single letter (e.g. 11, 39A, 109A)
+    return (
+        tokens.find(t => /^\d{2,}[A-Za-z]?$/.test(t)) ||
+        tokens.find(t => /^\d+[A-Za-z]?$/.test(t)) ||
+        tokens[0] ||
+        'Bus'
+    ).toUpperCase();
+}
 
 function safeLongToNumber(longVal) {
     if (!longVal) return null;
@@ -94,6 +107,17 @@ async function loadStaticData() {
               routesById[r.route_id] = r.route_short_name;
           }
       }).on('end', () => resolve());
+  });
+
+  // TRIP HEADSIGNS
+  await new Promise(resolve => {
+      const p = path.join(__dirname, 'gtfs', 'static', 'trips.txt');
+      if (!fs.existsSync(p)) return resolve();
+      fs.createReadStream(p).pipe(csv()).on('data', r => {
+          if (r.trip_id && r.trip_headsign) {
+              tripHeadsigns[r.trip_id] = r.trip_headsign;
+          }
+      }).on('end', () => { console.log(`✅ Loaded ${Object.keys(tripHeadsigns).length} trip headsigns.`); resolve(); });
   });
 }
 
@@ -187,22 +211,28 @@ app.get('/stops/:id/arrivals', async (req) => {
         tripUpdatesCache.entity.forEach(entity => {
             if (entity.tripUpdate?.stopTimeUpdate) {
                 const trip = entity.tripUpdate;
-                let cleanRoute = trip.trip.routeId || '';
-                if (cleanRoute.includes('-')) cleanRoute = cleanRoute.split('-')[1];
+                const cleanRoute = extractRouteNumber(trip.trip.routeId);
 
                 trip.stopTimeUpdate.forEach(stopUpdate => {
                     const apiStopId = stopUpdate.stopId || "";
-                    const isMatch = apiStopId === stopId || apiStopId.endsWith(targetSuffix) || stopId.endsWith(apiStopId);
+                    const isMatch = apiStopId === stopId ||
+                        (targetSuffix.length >= 4 && apiStopId.endsWith(targetSuffix)) ||
+                        (apiStopId.length >= 4 && stopId.endsWith(apiStopId.slice(-6)));
 
                     if (isMatch) {
                         const timeSec = safeLongToNumber(stopUpdate.arrival?.time) || safeLongToNumber(stopUpdate.departure?.time);
                         if (timeSec) {
                             const arrivalMs = timeSec * 1000;
                             if (arrivalMs > now - 3600000) {
+                                const rtTripId = trip.trip.tripId || '';
+                                const headsign = tripHeadsigns[rtTripId]
+                                    || tripHeadsigns[rtTripId.replace(/^\d+\.\d+\./, '')]
+                                    || tripHeadsigns[rtTripId.split('.').slice(-1)[0]]
+                                    || null;
                                 arrivals.push({
-                                    route_short_name: cleanRoute, 
-                                    destination: 'City Centre', 
-                                    predicted_time: arrivalMs, 
+                                    route_short_name: cleanRoute,
+                                    destination: headsign || cleanRoute || 'Service',
+                                    predicted_time: arrivalMs,
                                     trip_id: trip.trip.tripId,
                                     status: 'LIVE'
                                 });
@@ -257,9 +287,8 @@ const handleRouteVehicles = async (req) => {
         vehiclePositionsCache.entity.forEach(e => {
             if (e.vehicle?.position) {
                 const v = e.vehicle;
-                let routeName = v.trip?.routeId || '';
-                if(routeName.includes('-')) routeName = routeName.split('-')[1];
-                if (routeName.toUpperCase() === shortName) {
+                const routeName = extractRouteNumber(v.trip?.routeId);
+                if (routeName === shortName) {
                      vehicles.push({
                         id: v.id || v.trip?.tripId || `bus_${Math.random()}`,
                         latitude: v.position.latitude, 
@@ -283,8 +312,7 @@ app.get('/vehicles', async () => {
         vehiclePositionsCache.entity.slice(0, 200).forEach(e => {
             if (e.vehicle?.position) {
                 const safeId = e.vehicle.id || e.vehicle.trip?.tripId || `bus_${Math.random()}`;
-                let routeName = e.vehicle.trip?.routeId || 'Bus';
-                if(routeName.includes('-')) routeName = routeName.split('-')[1];
+                const routeName = extractRouteNumber(e.vehicle.trip?.routeId);
                 vehicles.push({ id: safeId, latitude: e.vehicle.position.latitude, longitude: e.vehicle.position.longitude, route: routeName });
             }
         });
@@ -295,9 +323,11 @@ app.get('/vehicles', async () => {
 // 5. USER & FAVOURITES
 async function getOrCreateUser(username) {
     const clean = String(username).trim();
-    const { data } = await supabase.from('users').select('*').eq('username', clean).single();
+    const { data, error } = await supabase.from('users').select('*').eq('username', clean).single();
+    if (error && error.code !== 'PGRST116') console.error('❌ Supabase select user error:', error.message);
     if (data) return data;
-    const { data: newUser } = await supabase.from('users').insert({ username: clean, favourites: [], xp: 0 }).select().single();
+    const { data: newUser, error: insertError } = await supabase.from('users').insert({ username: clean, favourites: [], xp: 0 }).select().single();
+    if (insertError) console.error('❌ Supabase insert user error:', insertError.message);
     return newUser || { username: clean, favourites: [], xp: 0 };
 }
 app.get('/users/:username/favourites', async (req) => {
@@ -310,7 +340,8 @@ app.post('/users/:username/favourites', async (req) => {
     let newFavs = u.favourites || [];
     if (favourite) { if (!newFavs.includes(stop_id)) newFavs.push(stop_id); } 
     else { newFavs = newFavs.filter(id => id !== stop_id); }
-    await supabase.from('users').update({ favourites: newFavs }).eq('username', u.username);
+    const { error: updateError } = await supabase.from('users').update({ favourites: newFavs }).eq('username', u.username);
+    if (updateError) console.error('❌ Supabase update favourites error:', updateError.message);
     return { ok: true, favourites: newFavs };
 });
 
@@ -369,11 +400,94 @@ app.post('/stops/by-ids', async (req) => { return realStops.filter(s => (req.bod
 app.get('/stops/nearby', async (req) => {
     const lat = parseFloat(req.query.lat); const lon = parseFloat(req.query.lon);
     if (!realStops.length) return [];
-    const sorted = [...realStops].sort((a, b) => ((a.stop_lat - lat)**2 + (a.stop_lon - lon)**2) - ((b.stop_lat - lat)**2 + (b.stop_lon - lon)**2));
+    const delta = 0.05; // ~5km bounding box pre-filter before expensive sort
+    const candidates = realStops.filter(s => Math.abs(s.stop_lat - lat) < delta && Math.abs(s.stop_lon - lon) < delta);
+    const pool = candidates.length > 0 ? candidates : realStops;
+    const sorted = pool.sort((a, b) => ((a.stop_lat - lat)**2 + (a.stop_lon - lon)**2) - ((b.stop_lat - lat)**2 + (b.stop_lon - lon)**2));
     return sorted.slice(0, 30);
 });
 app.get('/stops/heat', async () => { return { ok: true, heat: {} }; });
 app.get('/health', async () => ({ ok: true }));
+
+// 7. JOURNEYS
+app.post('/journeys/start', async (req) => {
+    const { username, route_short_name, route_long_name } = req.body;
+    await supabase.from('journeys').insert({ username, route_short_name, route_long_name });
+    return { ok: true };
+});
+app.get('/users/:username/journeys', async (req) => {
+    const { data } = await supabase.from('journeys').select('*').eq('username', req.params.username).order('created_at', { ascending: false });
+    return { ok: true, journeys: data || [] };
+});
+
+// 8. ALERTS
+app.get('/users/:username/alerts', async (req) => {
+    const { data } = await supabase.from('alerts').select('*').eq('username', req.params.username);
+    return { ok: true, alerts: data || [] };
+});
+app.post('/alerts/register', async (req) => {
+    const { username, stop_id, route_id, threshold_minutes } = req.body;
+    const { data } = await supabase.from('alerts').insert({ username, stop_id, route_id, threshold_minutes }).select().single();
+    return { ok: true, alert: data };
+});
+app.post('/alerts/:id/cancel', async (req) => {
+    await supabase.from('alerts').delete().eq('id', req.params.id);
+    return { ok: true };
+});
+
+// 9. STOP REVIEWS
+app.get('/stops/:id/reviews', async (req) => {
+    const { data } = await supabase
+        .from('stop_reviews')
+        .select('*')
+        .eq('stop_id', req.params.id)
+        .order('created_at', { ascending: false })
+        .limit(20);
+
+    const reviews = data || [];
+
+    // Aggregate stats
+    const count = reviews.length;
+    const avgOverall = count ? (reviews.reduce((s, r) => s + (r.overall || 0), 0) / count).toFixed(1) : null;
+
+    const mode = (arr, field) => {
+        const freq = {};
+        arr.forEach(r => { if (r[field]) freq[r[field]] = (freq[r[field]] || 0) + 1; });
+        return Object.keys(freq).sort((a, b) => freq[b] - freq[a])[0] || null;
+    };
+
+    return {
+        ok: true,
+        reviews,
+        summary: {
+            count,
+            avg_overall: avgOverall,
+            busyness: mode(reviews, 'busyness'),
+            shelter: mode(reviews, 'shelter'),
+            condition: mode(reviews, 'condition'),
+        }
+    };
+});
+
+app.post('/stops/:id/reviews', async (req) => {
+    const { username, overall, busyness, shelter, condition, note } = req.body;
+    const stop_id = req.params.id;
+
+    const { data, error } = await supabase
+        .from('stop_reviews')
+        .insert({ stop_id, username, overall, busyness, shelter, condition, note })
+        .select()
+        .single();
+
+    if (error) console.error('❌ Supabase insert review error:', error.message);
+
+    // Award XP for reviewing
+    const u = await getOrCreateUser(username);
+    const newXp = (u.xp || 0) + 5;
+    await supabase.from('users').update({ xp: newXp }).eq('username', username);
+
+    return { ok: true, review: data };
+});
 
 // START
 const start = async () => {
