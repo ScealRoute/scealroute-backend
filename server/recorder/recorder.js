@@ -63,15 +63,20 @@ function serviceDateFor(date = new Date()) {
   return d.toISOString().slice(0, 10);
 }
 
+/**
+ * protobufjs returns a zero-valued Long for absent int64 fields rather than undefined,
+ * so `su.arrival?.time` is truthy even when the feed carried no time at all. Most stop
+ * updates in this feed are delay-only: `{"delay":588}` with no time field. Treating that
+ * zero as a real timestamp writes 1970-01-01 into the database, which is how this was found.
+ */
 function toMillis(v) {
   if (v === null || v === undefined) return null;
-  if (typeof v === 'number') return v * 1000;
-  if (typeof v === 'object' && typeof v.toNumber === 'function') return v.toNumber() * 1000;
-  if (typeof v === 'object' && v.low !== undefined) {
-    return (v.low >>> 0) * 1000 + (v.high || 0) * 4294967296000;
-  }
-  const n = Number(v);
-  return Number.isFinite(n) ? n * 1000 : null;
+  let secs;
+  if (typeof v === 'number') secs = v;
+  else if (typeof v === 'object' && typeof v.toNumber === 'function') secs = v.toNumber();
+  else secs = Number(v);
+  if (!Number.isFinite(secs) || secs <= 0) return null;
+  return secs * 1000;
 }
 
 function iso(ms) {

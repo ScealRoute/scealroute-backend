@@ -48,7 +48,27 @@ function readCsv(file, onRow) {
  */
 const RAIL_ID = /^[A-Z][A-Z/.]*(-[A-Z][A-Z/.]*)+-[IO]$/;
 
-export function makeRouteResolver(shortNames) {
+/**
+ * IMPORTANT: the returned short name is a best-effort *label*, not an identity.
+ * Observations are grouped by the raw feed routeId, which is always present and always
+ * stable. Naming is interpretation and belongs in the rollup, where it can be recomputed.
+ *
+ * Why not join trip_id against the static feed, which would be authoritative? Because it
+ * currently joins at 0%. The committed static GTFS is the December 2025 snapshot and its
+ * trip ids (`5146_1001`) are completely disjoint from what the live feed now emits
+ * (`5850_35137`). Refreshing the static feed is a prerequisite for authoritative naming.
+ *
+ * The space-delimited bus format leads with an operator token, not the route:
+ *   "2 64 d a"    -> 64,  not 2
+ *   "2 109A c b"  -> 109A
+ * Taking the first route-shaped token returns the operator code for every service, which
+ * silently collapses hundreds of distinct routes into "1", "2" and "3". Found by reading
+ * real rows back out of the database.
+ */
+// GTFS route_type: 0 tram, 2 rail, 3 bus.
+const MODE_BY_ROUTE_TYPE = { 0: 'tram', 2: 'rail', 3: 'bus' };
+
+export function makeRouteResolver(shortNames, modeByShortName = new Map()) {
   return function resolveRoute(rawRouteId) {
     if (!rawRouteId) return { shortName: null, mode: null };
     const raw = String(rawRouteId).trim();
@@ -58,23 +78,31 @@ export function makeRouteResolver(shortNames) {
       return { shortName: raw.replace(/-[IO]$/, ''), mode: 'rail' };
     }
 
-    const tokens = raw.split(/[\s\-_]+/).filter(Boolean);
+    const tokens = raw.split(/\s+/).filter(Boolean);
+    // Drop the leading operator token before looking for the route.
+    const body = tokens.length >= 2 ? tokens.slice(1) : tokens;
 
-    // A token that is exactly a known route short name wins outright.
-    for (const t of tokens) {
+    // A token that is exactly a known route short name wins outright. Mode comes from that
+    // route's GTFS route_type rather than being assumed: "10000 GREEN g a" is the LUAS
+    // Green Line, and scoring a tram as a bus produced a nonsensical 35-minutes-early
+    // median before this was caught.
+    for (const t of body) {
       const up = t.toUpperCase();
-      if (shortNames.has(up)) return { shortName: up, mode: 'bus' };
+      if (shortNames.has(up)) return { shortName: up, mode: modeByShortName.get(up) || 'bus' };
     }
 
     // Otherwise accept a bus-route-shaped token: digits with an optional trailing letter.
-    const shaped = tokens.find((t) => /^\d{1,4}[A-Za-z]?$/.test(t));
-    return shaped ? { shortName: shaped.toUpperCase(), mode: 'bus' } : { shortName: null, mode: null };
+    const shaped = body.find((t) => /^\d{1,4}[A-Za-z]?$/.test(t));
+    if (!shaped) return { shortName: null, mode: null };
+    const up = shaped.toUpperCase();
+    return { shortName: up, mode: modeByShortName.get(up) || 'bus' };
   };
 }
 
 export async function loadStatic() {
   const routeShortNames = new Set();
   const routesById = new Map();
+  const modeByShortName = new Map();
 
   const routeCount = await readCsv('routes.txt', (r) => {
     if (!r.route_id) return;
@@ -83,7 +111,10 @@ export async function loadStatic() {
     // so they must not enter the match set or every train resolves to the same route.
     const short = String(r.route_short_name || '').trim();
     if (short && !/^(rail|intercity)$/i.test(short)) {
-      routeShortNames.add(short.toUpperCase());
+      const up = short.toUpperCase();
+      routeShortNames.add(up);
+      const mode = MODE_BY_ROUTE_TYPE[String(r.route_type).trim()];
+      if (mode) modeByShortName.set(up, mode);
     }
   });
 
@@ -91,6 +122,7 @@ export async function loadStatic() {
     routeCount,
     routesById,
     routeShortNames,
-    resolveRoute: makeRouteResolver(routeShortNames),
+    modeByShortName,
+    resolveRoute: makeRouteResolver(routeShortNames, modeByShortName),
   };
 }
