@@ -1,10 +1,15 @@
-// Static GTFS lookups needed by the recorder.
+// Static GTFS lookups.
 //
-// Deliberately does NOT load stop_times.txt. That file is 536 MB / 10.2M rows, and the
-// recorder does not need it: the realtime feed reports `delay` directly on ~88% of stop
-// updates, so punctuality is measured without joining to scheduled times. Keeping this
-// out is the difference between a process that starts in two seconds and one that needs
-// gigabytes of heap.
+// Against a CURRENT feed these are exact joins, not guesses: the realtime feed's routeId
+// matches routes.txt route_id (98.1% of live trips) and its tripId matches trips.txt
+// trip_id (100%). Route names, modes and destinations are therefore looked up, not parsed.
+//
+// That was not true of the December 2025 feed previously committed to this repo, where
+// both joins were 0% because the identifier space had rolled over. If these hit rates
+// collapse, the static feed is stale: run recorder/fetch-static.js.
+//
+// stop_times.txt is not loaded. It is 525 MB and nothing needs it yet; the realtime feed
+// reports `delay` directly, so punctuality is measured without scheduled times.
 
 import fs from 'fs';
 import path from 'path';
@@ -13,6 +18,12 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATIC_DIR = path.join(__dirname, '..', 'gtfs', 'static');
+
+// GTFS route_type: 0 tram, 2 rail, 3 bus.
+const MODE_BY_ROUTE_TYPE = { 0: 'tram', 1: 'metro', 2: 'rail', 3: 'bus', 4: 'ferry' };
+
+// Rail services appear in the realtime feed as ORIGIN-DEST-direction, e.g. "DUB-CORK-O".
+const RAIL_ID = /^[A-Z][A-Z/.]*(-[A-Z][A-Z/.]*)+-[IO]$/;
 
 function readCsv(file, onRow) {
   return new Promise((resolve, reject) => {
@@ -28,101 +39,71 @@ function readCsv(file, onRow) {
 }
 
 /**
- * The realtime feed's routeId is not the static route_id. Observed live formats:
- *   "2 245 c a"      bus: space-delimited, the route number is the numeric token
- *   "DUB-CORK-O"     rail: ORIGIN-DEST-direction, no numeric token at all
- *   "BRAY-HOWTH-I"   rail: DART
- * Static route_id looks like "5146_116052", which the feed never uses.
+ * Fallback only, for the ~2% of realtime routeIds with no match in routes.txt.
+ * The space-delimited form leads with an operator token, not the route: "2 64 d a" is
+ * route 64 operated by 2. Taking the first route-shaped token yields the operator for
+ * every service and silently merges hundreds of routes, so the leading token is dropped.
  *
- * Rail is resolved from the feed id rather than the static feed on purpose: the static
- * route_short_name for every intercity service is the literal string "rail" or
- * "InterCity", which is useless as an identifier. "DUB-CORK" is the better name and the
- * feed already gives it to us.
- *
- * Mode is carried alongside because blending bus and rail punctuality into a single
- * route health figure would not be meaningful. They have different schedules, different
- * operators and different tolerances for what counts as late.
- *
- * Returning null is preferable to guessing: a misattributed observation silently
- * corrupts another route's statistics, which is the one failure this data cannot survive.
+ * Returns null rather than guessing wildly, because a misattributed observation corrupts
+ * another route's statistics, which is the one failure this dataset cannot survive.
  */
-const RAIL_ID = /^[A-Z][A-Z/.]*(-[A-Z][A-Z/.]*)+-[IO]$/;
-
-/**
- * IMPORTANT: the returned short name is a best-effort *label*, not an identity.
- * Observations are grouped by the raw feed routeId, which is always present and always
- * stable. Naming is interpretation and belongs in the rollup, where it can be recomputed.
- *
- * Why not join trip_id against the static feed, which would be authoritative? Because it
- * currently joins at 0%. The committed static GTFS is the December 2025 snapshot and its
- * trip ids (`5146_1001`) are completely disjoint from what the live feed now emits
- * (`5850_35137`). Refreshing the static feed is a prerequisite for authoritative naming.
- *
- * The space-delimited bus format leads with an operator token, not the route:
- *   "2 64 d a"    -> 64,  not 2
- *   "2 109A c b"  -> 109A
- * Taking the first route-shaped token returns the operator code for every service, which
- * silently collapses hundreds of distinct routes into "1", "2" and "3". Found by reading
- * real rows back out of the database.
- */
-// GTFS route_type: 0 tram, 2 rail, 3 bus.
-const MODE_BY_ROUTE_TYPE = { 0: 'tram', 2: 'rail', 3: 'bus' };
-
-export function makeRouteResolver(shortNames, modeByShortName = new Map()) {
-  return function resolveRoute(rawRouteId) {
-    if (!rawRouteId) return { shortName: null, mode: null };
-    const raw = String(rawRouteId).trim();
-
-    // Rail: strip the trailing direction marker, keep the origin-destination pair.
-    if (RAIL_ID.test(raw)) {
-      return { shortName: raw.replace(/-[IO]$/, ''), mode: 'rail' };
-    }
-
-    const tokens = raw.split(/\s+/).filter(Boolean);
-    // Drop the leading operator token before looking for the route.
-    const body = tokens.length >= 2 ? tokens.slice(1) : tokens;
-
-    // A token that is exactly a known route short name wins outright. Mode comes from that
-    // route's GTFS route_type rather than being assumed: "10000 GREEN g a" is the LUAS
-    // Green Line, and scoring a tram as a bus produced a nonsensical 35-minutes-early
-    // median before this was caught.
-    for (const t of body) {
-      const up = t.toUpperCase();
-      if (shortNames.has(up)) return { shortName: up, mode: modeByShortName.get(up) || 'bus' };
-    }
-
-    // Otherwise accept a bus-route-shaped token: digits with an optional trailing letter.
-    const shaped = body.find((t) => /^\d{1,4}[A-Za-z]?$/.test(t));
-    if (!shaped) return { shortName: null, mode: null };
-    const up = shaped.toUpperCase();
-    return { shortName: up, mode: modeByShortName.get(up) || 'bus' };
-  };
+function parseRouteName(raw) {
+  if (RAIL_ID.test(raw)) return { shortName: raw.replace(/-[IO]$/, ''), mode: 'rail' };
+  const tokens = raw.split(/\s+/).filter(Boolean);
+  const body = tokens.length >= 2 ? tokens.slice(1) : tokens;
+  const shaped = body.find((t) => /^\d{1,4}[A-Za-z]?$/.test(t));
+  return shaped ? { shortName: shaped.toUpperCase(), mode: null } : { shortName: null, mode: null };
 }
 
-export async function loadStatic() {
-  const routeShortNames = new Set();
-  const routesById = new Map();
-  const modeByShortName = new Map();
+/**
+ * @param {object} opts
+ * @param {boolean} opts.withTrips  Load trips.txt (314k rows, ~25 MB) for trip->route and
+ *   headsign lookups. The recorder does not need it; the API does, for destinations.
+ */
+export async function loadStatic({ withTrips = false } = {}) {
+  const routes = new Map();      // route_id -> { shortName, longName, mode }
+  const tripToRoute = new Map(); // trip_id  -> route_id
+  const headsigns = new Map();   // trip_id  -> trip_headsign
 
   const routeCount = await readCsv('routes.txt', (r) => {
     if (!r.route_id) return;
-    routesById.set(r.route_id, r.route_short_name || null);
-    // "rail" and "InterCity" are placeholders in the NTA feed, not route identifiers,
-    // so they must not enter the match set or every train resolves to the same route.
     const short = String(r.route_short_name || '').trim();
-    if (short && !/^(rail|intercity)$/i.test(short)) {
-      const up = short.toUpperCase();
-      routeShortNames.add(up);
-      const mode = MODE_BY_ROUTE_TYPE[String(r.route_type).trim()];
-      if (mode) modeByShortName.set(up, mode);
-    }
+    routes.set(r.route_id, {
+      // "rail" and "InterCity" are placeholders in this feed, not identifiers, so a route
+      // carrying one gets its long name instead ("Dublin - Cork").
+      shortName: short && !/^(rail|intercity)$/i.test(short) ? short : (r.route_long_name || null),
+      longName: r.route_long_name || null,
+      mode: MODE_BY_ROUTE_TYPE[String(r.route_type).trim()] || null,
+    });
   });
 
-  return {
-    routeCount,
-    routesById,
-    routeShortNames,
-    modeByShortName,
-    resolveRoute: makeRouteResolver(routeShortNames, modeByShortName),
-  };
+  let tripCount = 0;
+  if (withTrips) {
+    tripCount = await readCsv('trips.txt', (t) => {
+      if (!t.trip_id) return;
+      if (t.route_id) tripToRoute.set(t.trip_id, t.route_id);
+      if (t.trip_headsign) headsigns.set(t.trip_id, t.trip_headsign);
+    });
+  }
+
+  /** Exact lookup first; parse only when the feed offers a route this static feed lacks. */
+  function resolveRoute(rawRouteId, tripId) {
+    if (!rawRouteId && !tripId) return { shortName: null, mode: null, matched: false };
+
+    let entry = rawRouteId ? routes.get(rawRouteId) : null;
+
+    // Some realtime entities carry a tripId we can resolve even when the routeId is unknown.
+    if (!entry && tripId && tripToRoute.has(tripId)) {
+      entry = routes.get(tripToRoute.get(tripId));
+    }
+
+    if (entry) return { shortName: entry.shortName, mode: entry.mode, matched: true };
+
+    const parsed = parseRouteName(String(rawRouteId || '').trim());
+    return { ...parsed, matched: false };
+  }
+
+  const headsignFor = (tripId) => (tripId ? headsigns.get(tripId) || null : null);
+
+  return { routeCount, tripCount, routes, tripToRoute, headsigns, resolveRoute, headsignFor };
 }

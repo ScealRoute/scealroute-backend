@@ -54,6 +54,9 @@ const dirtyTrips = new Set();
 const writtenAt = new Map(); // key -> ms of last successful persist, for staleness checkpointing
 
 const stats = { polls: 0, ok: 0, rateLimited: 0, failed: 0, flushed: 0, flushErrors: 0 };
+// Route ids the static feed does not know about. A growing set means the static feed has
+// gone stale and fetch-static.js needs to run.
+const unmatchedRoutes = new Set();
 
 /**
  * Service date, not calendar date. Transit days run past midnight: a 00:40 departure
@@ -131,7 +134,8 @@ async function pollOnce(resolveRoute) {
     if (!tripId) continue; // ~1% of entities; nothing to key on, so not recordable
 
     const routeId = tu.trip.routeId || null;
-    const { shortName: routeShortName, mode } = resolveRoute(routeId);
+    const { shortName: routeShortName, mode, matched } = resolveRoute(routeId, tripId);
+    if (!matched) unmatchedRoutes.add(routeId || '(none)');
     const sr = tu.trip.scheduleRelationship ?? null;
 
     const tKey = `${serviceDate}|${tripId}`;
@@ -231,7 +235,8 @@ async function pollOnce(resolveRoute) {
   const age = feedTsMs ? Math.round((Date.now() - feedTsMs) / 1000) : '?';
   console.log(
     `poll ${stats.polls}: ${entities} trips, ${stopUpdates} stop updates, feed age ${age}s ` +
-    `| tracking ${stopObs.size} stop events across ${tripObs.size} trips`
+    `| tracking ${stopObs.size} stop events across ${tripObs.size} trips` +
+    (unmatchedRoutes.size ? ` | ${unmatchedRoutes.size} unmatched route ids` : '')
   );
 }
 
@@ -309,7 +314,7 @@ async function main() {
   console.log(`ScealRoute route health recorder${DRY_RUN ? ' [DRY RUN, no database writes]' : ''}`);
 
   const { routeCount, resolveRoute } = await loadStatic();
-  console.log(`loaded ${routeCount} routes for short-name resolution`);
+  console.log(`loaded ${routeCount} routes from the static feed`);
   console.log(`polling every ${POLL_INTERVAL_MS / 1000}s, flushing every ${FLUSH_INTERVAL_MS / 1000}s`);
 
   await pollOnce(resolveRoute);

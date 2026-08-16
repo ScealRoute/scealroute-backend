@@ -20,12 +20,24 @@ API read from these tables, or obtain a second key.
 
 ## Setup
 
+Database (already applied to the ScealRoute project; migrations live in `supabase/migrations/`):
+
 ```bash
-psql "$DATABASE_URL" -f schema.sql      # tables
-psql "$DATABASE_URL" -f rollup.sql      # rollup function + public view
+supabase db push --linked
 ```
 
-Or paste both into the Supabase SQL editor.
+Static GTFS feed, required before first run and periodically thereafter:
+
+```bash
+node recorder/fetch-static.js                    # ~25 MB kept out of a 187 MB archive
+node recorder/fetch-static.js --with-stop-times  # adds the 525 MB timetable
+```
+
+**The static feed is not committed and must not be.** NTA republishes it regularly. The
+December 2025 snapshot that used to live in this repo had drifted so far by August 2026
+that its identifiers no longer matched the realtime feed at all: `trip_id` joined at 0%,
+`route_id` not at all. Route names had to be guessed and destinations were unavailable.
+Against a current feed both joins are exact.
 
 ## Running
 
@@ -83,12 +95,14 @@ punctuality is measured without joining to scheduled times.
 **Bus and rail are recorded separately** via the `mode` column and never blended into one
 score. They have different operators, schedules and tolerances for lateness.
 
-**Route names resolve at 100%** against the live feed. The feed's `routeId` is not the
-static `route_id`: buses appear as `"2 245 c a"` and rail as `"DUB-CORK-O"`. Rail is named
-from the feed rather than the static file because every intercity service has the literal
-`route_short_name` of `"rail"` or `"InterCity"`, which is useless as an identifier.
-The resolver returns null rather than guessing, because a misattributed observation
-silently corrupts another route's statistics.
+**Route names are looked up, not parsed.** Against a current static feed the realtime
+`routeId` matches `routes.txt` at 98.1% and `tripId` matches `trips.txt` at 100%, so names,
+modes and destinations are exact joins. A parser survives only as a fallback for the ~2%
+with no match, and it returns null rather than guessing wildly, because a misattributed
+observation silently corrupts another route's statistics.
+
+The recorder logs a count of unmatched route ids each poll. **A growing count means the
+static feed has gone stale**; run `fetch-static.js`.
 
 **Collection stores signal, the rollup stores opinion.** Thresholds for "on time" live in
 `rollup.sql` and can be changed and re-run over the raw data. Nothing interpretive is baked
