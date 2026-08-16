@@ -22,6 +22,12 @@ dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), '.
 const DRY_RUN = process.argv.includes('--dry-run');
 const ONCE = process.argv.includes('--once');
 
+// Poll for a fixed number of seconds then flush and exit cleanly. Used when the recorder
+// runs as a scheduled job rather than a long-lived process: each run covers a window, and
+// the next scheduled run picks up where it left off.
+const durationArg = process.argv.indexOf('--duration');
+const DURATION_S = durationArg !== -1 ? Number(process.argv[durationArg + 1]) : null;
+
 // 3 req/min quota. 25s leaves headroom for a retry without tipping over the limit.
 const POLL_INTERVAL_MS = Number(env('RECORDER_POLL_MS') || 25_000);
 const FLUSH_INTERVAL_MS = Number(env('RECORDER_FLUSH_MS') || 120_000);
@@ -347,6 +353,11 @@ async function main() {
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  if (DURATION_S) {
+    console.log(`polling for ${DURATION_S}s, then flushing and exiting`);
+    setTimeout(() => shutdown(`duration ${DURATION_S}s reached`), DURATION_S * 1000).unref?.();
+  }
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
