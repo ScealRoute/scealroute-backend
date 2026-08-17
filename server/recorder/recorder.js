@@ -16,6 +16,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { loadStatic } from './static.js';
 import { env } from './env.js';
+import { Quota } from './quota.js';
+import os from 'os';
 
 dotenv.config({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '.env') });
 
@@ -36,19 +38,37 @@ const FLUSH_INTERVAL_MS = Number(env('RECORDER_FLUSH_MS') || 120_000);
 const CHECKPOINT_MS = Number(env('RECORDER_CHECKPOINT_MS') || 900_000);
 const BATCH_SIZE = 500;
 
+// Measured quota: 3 req/min pooled across all GTFS-RT endpoints on the key.
+const quota = new Quota(Number(env('TFI_MAX_PER_MIN') || 3));
+let consecutive429 = 0;
+
+// Identifies this process when contending for the single-poller lease.
+const HOLDER = env('RECORDER_HOLDER')
+  || `${process.env.GITHUB_RUN_ID ? `gha-${process.env.GITHUB_RUN_ID}` : os.hostname()}-${process.pid}`;
+const LEASE_TTL_S = Number(env('RECORDER_LEASE_TTL_S') || 90);
+let haveLease = false;
+
 const TRIP_UPDATES_URL =
   env('TFI_TRIP_UPDATES_URL', 'https://api.nationaltransport.ie/gtfsr/v2/TripUpdates');
 const TFI_API_KEY = env('TFI_API_KEY');
 
+// The client is created even in dry-run, because dry-run still calls the real feed and so
+// still consumes quota, and therefore still has to take the poller lease. Dry-run
+// suppresses database *writes*; it is not a licence to poll alongside a live recorder.
 let supabase = null;
-if (!DRY_RUN) {
+{
   const url = env('SUPABASE_URL');
   const key = env('SUPABASE_KEY');
   if (!url || !key) {
-    console.error('Missing SUPABASE_URL or SUPABASE_KEY. Use --dry-run to test without a database.');
-    process.exit(1);
+    if (!DRY_RUN) {
+      console.error('Missing SUPABASE_URL or SUPABASE_KEY.');
+      process.exit(1);
+    }
+    console.warn('No database credentials: running without the poller lease.');
+    console.warn('If a scheduled recorder is running, this will collide with it and both will be rate limited.');
+  } else {
+    supabase = createClient(url, key);
   }
-  supabase = createClient(url, key);
 }
 
 // --- in-memory accumulators, keyed so that repeated observations merge rather than duplicate
@@ -59,7 +79,7 @@ const dirtyStops = new Set();
 const dirtyTrips = new Set();
 const writtenAt = new Map(); // key -> ms of last successful persist, for staleness checkpointing
 
-const stats = { polls: 0, ok: 0, rateLimited: 0, failed: 0, flushed: 0, flushErrors: 0 };
+const stats = { polls: 0, ok: 0, rateLimited: 0, failed: 0, skippedForQuota: 0, lostLease: 0, flushed: 0, flushErrors: 0 };
 // Route ids the static feed does not know about. A growing set means the static feed has
 // gone stale and fetch-static.js needs to run.
 const unmatchedRoutes = new Set();
@@ -95,13 +115,55 @@ function iso(ms) {
   return ms === null || ms === undefined ? null : new Date(ms).toISOString();
 }
 
+/**
+ * Only one recorder may poll at a time. Two processes sharing the key do not halve each
+ * other's throughput, they starve each other: both sit at 429 and neither records. Skipped
+ * in dry-run, which sends no writes and is used for local inspection.
+ */
+async function holdLease() {
+  if (!supabase) return true;   // no credentials at all; warned about at startup
+  const { data, error } = await supabase.rpc('acquire_recorder_lease', {
+    p_holder: HOLDER,
+    p_ttl_seconds: LEASE_TTL_S,
+  });
+  if (error) {
+    // Fail closed: if we cannot confirm we hold the lease, do not poll.
+    console.error(`lease check failed: ${error.message}`);
+    return false;
+  }
+  return data === true;
+}
+
+async function releaseLease() {
+  if (!supabase || !haveLease) return;
+  try { await supabase.rpc('release_recorder_lease', { p_holder: HOLDER }); } catch {}
+}
+
 async function pollOnce(resolveRoute) {
   const startedAt = Date.now();
+  // Never send a request the quota cannot afford. The API returns 429 with no Retry-After
+  // and no rate-limit headers, so there is nothing useful to react to afterwards.
+  const wait = quota.waitMs();
+  if (wait > 0) {
+    stats.skippedForQuota++;
+    console.log(`skipping poll, quota would be exceeded (next slot in ${Math.ceil(wait / 1000)}s)`);
+    return;
+  }
+
+  if (!(await holdLease())) {
+    haveLease = false;
+    stats.lostLease++;
+    console.warn('another recorder holds the poller lease; not polling');
+    return;
+  }
+  haveLease = true;
+
   const poll = { feed: 'trip_updates', polled_at: new Date().toISOString() };
   stats.polls++;
 
   let res;
   try {
+    quota.record();
     res = await fetch(TRIP_UPDATES_URL, { headers: { 'x-api-key': TFI_API_KEY } });
   } catch (err) {
     stats.failed++;
@@ -115,11 +177,20 @@ async function pollOnce(resolveRoute) {
   poll.duration_ms = Date.now() - startedAt;
 
   if (!res.ok) {
-    if (res.status === 429) stats.rateLimited++; else stats.failed++;
-    pendingPolls.push({ ...poll, error: res.status === 429 ? 'rate limited' : `HTTP ${res.status}` });
-    console.warn(`HTTP ${res.status}${res.status === 429 ? ' (rate limited, backing off to next tick)' : ''}`);
+    if (res.status === 429) {
+      stats.rateLimited++;
+      const secs = quota.penalise(++consecutive429);
+      pendingPolls.push({ ...poll, error: `rate limited, backing off ${secs}s` });
+      console.warn(`HTTP 429 - backing off ${secs}s (consecutive: ${consecutive429})`);
+    } else {
+      stats.failed++;
+      pendingPolls.push({ ...poll, error: `HTTP ${res.status}` });
+      console.warn(`HTTP ${res.status}`);
+    }
     return;
   }
+  consecutive429 = 0;
+  quota.recover();
 
   const buf = await res.arrayBuffer();
   const feed = GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(new Uint8Array(buf));
@@ -242,12 +313,13 @@ async function pollOnce(resolveRoute) {
   console.log(
     `poll ${stats.polls}: ${entities} trips, ${stopUpdates} stop updates, feed age ${age}s ` +
     `| tracking ${stopObs.size} stop events across ${tripObs.size} trips` +
+    ` | quota ${quota.inWindow}/3` +
     (unmatchedRoutes.size ? ` | ${unmatchedRoutes.size} unmatched route ids` : '')
   );
 }
 
 async function flush() {
-  if (DRY_RUN) {
+  if (DRY_RUN || !supabase) {
     console.log(`[dry-run] would flush ${dirtyStops.size} stop rows, ${dirtyTrips.size} trip rows, ${pendingPolls.length} poll rows`);
     const stamp = Date.now();
     for (const k of dirtyStops) writtenAt.set(k, stamp);
@@ -321,6 +393,16 @@ async function main() {
 
   const { routeCount, resolveRoute } = await loadStatic();
   console.log(`loaded ${routeCount} routes from the static feed`);
+
+  // Refuse to record without it. Running with no routes does not fail loudly, it quietly
+  // writes observations with no route name attached, which pollutes the dataset in a way
+  // that is tedious to unpick later. This happened once: the feed is gitignored, so a
+  // fresh checkout has no static data until fetch-static.js runs.
+  if (routeCount === 0) {
+    console.error('No routes loaded. The static GTFS feed is missing or empty.');
+    console.error('Run: node recorder/fetch-static.js');
+    process.exit(1);
+  }
   console.log(`polling every ${POLL_INTERVAL_MS / 1000}s, flushing every ${FLUSH_INTERVAL_MS / 1000}s`);
 
   await pollOnce(resolveRoute);
@@ -348,6 +430,7 @@ async function main() {
     clearInterval(pollTimer);
     clearInterval(flushTimer);
     try { await flush(); } catch (e) { console.error('final flush failed:', e.message); }
+    await releaseLease();
     console.log('recorder stopped', stats);
     process.exit(0);
   };

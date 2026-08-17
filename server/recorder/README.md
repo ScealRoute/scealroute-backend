@@ -10,13 +10,33 @@ reason this runs as its own long-lived process rather than as part of the API.
 ## Rate limit
 
 The TFI quota is **3 requests per minute, pooled across every GTFS-RT endpoint on the key**
-(measured, not documented). The recorder polls TripUpdates every 25 seconds, which is about
-2.4 requests per minute and leaves headroom for a retry.
+(measured, not documented). A 429 carries no `Retry-After` and no rate-limit headers, so
+there is nothing useful to react to afterwards. Three things keep the recorder under it:
 
-This process must be the **only** thing polling that key. The API server's `refreshFeeds()`
-spends 4 requests per minute on its own, so running both against one key puts both
-permanently over budget and neither gets data. Either disable `refreshFeeds()` and have the
-API read from these tables, or obtain a second key.
+**1. A rolling-window quota guard** (`quota.js`). Requests are counted in a trailing 60s
+window and one that would exceed the limit is not sent at all. The 25s interval alone is
+already safe, but the interval is env-configurable, and the guard is what makes a
+misconfiguration harmless rather than a sustained 429 storm:
+
+| `RECORDER_POLL_MS` | unguarded, worst per 60s | guarded |
+|---|---|---|
+| 25s | 3 | 3 |
+| 15s | 4 (429s) | 3 |
+| 10s | 6 (429s) | 3 |
+| 5s  | 12 (429s) | 3 |
+
+**2. Exponential backoff on 429**, with jitter so two recovering processes do not
+resynchronise into the same collision. Roughly 61s, 120s, 243s, 301s on consecutive hits.
+
+**3. A single-poller lease** (`recorder_lease` table). Two recorders sharing a key do not
+halve each other's throughput, they starve each other: both sit at 429 and neither records.
+A recorder must hold the lease to poll, and acquisition is atomic so exactly one holder wins.
+
+`--dry-run` still takes the lease. It suppresses database writes, but it calls the real feed
+and so still consumes quota. Every 429 this project has ever recorded (4 of them) came from
+a local test running alongside the scheduled job before the lease existed.
+
+The API does not poll at all; it reads these tables.
 
 ## Setup
 
