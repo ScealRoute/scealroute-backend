@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node index.js",
     "recorder": "node recorder/recorder.js",
-    "fetch-static": "node recorder/fetch-static.js"
+    "fetch-static": "node recorder/fetch-static.js",
+    "baseline": "node recorder/schedule-baseline.js",
+    "rollup": "node recorder/rollup.js"
   },
   "dependencies": {
     "@fastify/cors": "^8.5.0",

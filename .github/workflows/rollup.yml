@@ -1,0 +1,79 @@
+# Nightly rollup: turn a day of raw observations into the publishable record.
+#
+# Runs after the service day closes, not after midnight. A transit day runs to 04:00 local
+# (a 00:40 departure belongs to the previous day's timetable), which is the rule the
+# recorder uses to assign service_date, so rolling up at midnight would cut the night
+# services off the day they belong to.
+#
+# 05:00 UTC is 06:00 Dublin in summer and 05:00 in winter, comfortably clear of the
+# boundary either way.
+#
+# Both yesterday and today are recomputed. Today is partial and will be redone tomorrow,
+# but recomputing it means the public record is never a full day stale, and re-running a
+# rollup is free: it deletes and rebuilds the target date from raw observations.
+
+name: Daily rollup
+
+on:
+  schedule:
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+    inputs:
+      from_date:
+        description: 'First service date to rebuild (YYYY-MM-DD)'
+        required: false
+      to_date:
+        description: 'Last service date to rebuild (YYYY-MM-DD)'
+        required: false
+
+concurrency:
+  group: rollup
+  cancel-in-progress: false
+
+jobs:
+  rollup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - run: npm ci --omit=dev
+        working-directory: server
+
+      - name: Resolve dates
+        id: dates
+        run: |
+          if [ -n "${{ inputs.from_date }}" ]; then
+            echo "from=${{ inputs.from_date }}" >> "$GITHUB_OUTPUT"
+            echo "to=${{ inputs.to_date || inputs.from_date }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "from=$(TZ=Europe/Dublin date -d 'yesterday' +%F)" >> "$GITHUB_OUTPUT"
+            echo "to=$(TZ=Europe/Dublin date +%F)" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The baseline is the denominator, so it must come from a current feed. Fetched fresh
+      # rather than cached: NTA republishes continuously, and a baseline built from a stale
+      # timetable is a denominator for a service pattern that was not running.
+      - name: Fetch static feed
+        working-directory: server
+        run: node recorder/fetch-static.js
+
+      - name: Build schedule baseline
+        working-directory: server
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: node recorder/schedule-baseline.js "${{ steps.dates.outputs.from }}" "${{ steps.dates.outputs.to }}"
+
+      - name: Compute rollups
+        working-directory: server
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: node recorder/rollup.js "${{ steps.dates.outputs.from }}" "${{ steps.dates.outputs.to }}"
