@@ -1,0 +1,61 @@
+# Standby recorder: covers the holes the six-hourly primary cannot.
+#
+# The primary in `recorder.yml` runs for nearly six hours at a time, so a run that dies
+# early — or a schedule GitHub silently skips, which it does under load — would leave a
+# six-hour hole in a dataset that can never be backfilled. The realtime feed has no
+# archive: a poll missed is data lost permanently, which is the whole reason this project
+# records at all.
+#
+# This runs every fifteen minutes and asks one question: is anyone polling? The poller
+# lease answers it atomically. If the primary is alive this exits within seconds having
+# done nothing, which is the common case and costs almost nothing. If the primary is gone,
+# this takes the lease and records until the next primary run reclaims it.
+#
+# It must NOT share a concurrency group with the primary. Queued behind a six-hour job it
+# would never run, which is precisely when it is needed.
+
+name: Recorder standby
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: recorder-standby
+  cancel-in-progress: false
+
+jobs:
+  standby:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: cache-static
+        uses: actions/cache@v4
+        with:
+          path: server/gtfs/static
+          key: gtfs-static-${{ github.run_id }}
+          restore-keys: gtfs-static-
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - run: npm ci --omit=dev
+        working-directory: server
+
+      # No fetch here. The recorder refuses to start with zero routes loaded, so a standby
+      # with no cached feed exits rather than recording unlabelled observations, and the
+      # next primary run repopulates the cache.
+      - name: Record if nobody else is
+        working-directory: server
+        env:
+          TFI_API_KEY: ${{ secrets.TFI_API_KEY }}
+          TFI_TRIP_UPDATES_URL: https://api.nationaltransport.ie/gtfsr/v2/TripUpdates
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: node recorder/recorder.js --duration 840 --yield-if-leased

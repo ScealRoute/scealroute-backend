@@ -30,6 +30,13 @@ const ONCE = process.argv.includes('--once');
 const durationArg = process.argv.indexOf('--duration');
 const DURATION_S = durationArg !== -1 ? Number(process.argv[durationArg + 1]) : null;
 
+// Exit cleanly, rather than sitting in a retry loop, when another recorder already holds
+// the lease. This is what makes a standby run cheap: the primary is a long-lived job, and
+// a standby that finds it alive should get out of the way in seconds instead of spinning
+// for its whole window. Without the flag the behaviour is unchanged — keep retrying, which
+// is what a primary run wants when it is contending at startup.
+const YIELD_IF_LEASED = process.argv.includes('--yield-if-leased');
+
 // 3 req/min quota. 25s leaves headroom for a retry without tipping over the limit.
 const POLL_INTERVAL_MS = Number(env('RECORDER_POLL_MS') || 25_000);
 const FLUSH_INTERVAL_MS = Number(env('RECORDER_FLUSH_MS') || 120_000);
@@ -47,6 +54,20 @@ const HOLDER = env('RECORDER_HOLDER')
   || `${process.env.GITHUB_RUN_ID ? `gha-${process.env.GITHUB_RUN_ID}` : os.hostname()}-${process.pid}`;
 const LEASE_TTL_S = Number(env('RECORDER_LEASE_TTL_S') || 90);
 let haveLease = false;
+
+// Set once the poll loop is running, so a stand-down decided inside a poll takes the same
+// flush-then-exit path as a signal. That matters for a standby that recorded a real gap
+// before the primary came back: its buffer holds observations nothing else captured.
+//
+// The bare exit covers the opposite case. The first poll is awaited before the loop is
+// built, so a standby that finds the primary already alive stands down with an empty
+// buffer and nothing to flush, which is the common path and should cost a fraction of a
+// second rather than a database round trip.
+let requestShutdown = null;
+function yieldToLeaseHolder() {
+  if (requestShutdown) requestShutdown('lease held by another recorder');
+  else process.exit(0);
+}
 
 const TRIP_UPDATES_URL =
   env('TFI_TRIP_UPDATES_URL', 'https://api.nationaltransport.ie/gtfsr/v2/TripUpdates');
@@ -153,6 +174,11 @@ async function pollOnce(resolveRoute) {
   if (!(await holdLease())) {
     haveLease = false;
     stats.lostLease++;
+    if (YIELD_IF_LEASED) {
+      console.log('another recorder holds the poller lease; standing down');
+      yieldToLeaseHolder();
+      return;
+    }
     console.warn('another recorder holds the poller lease; not polling');
     return;
   }
@@ -436,6 +462,7 @@ async function main() {
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+  requestShutdown = shutdown;
 
   if (DURATION_S) {
     console.log(`polling for ${DURATION_S}s, then flushing and exiting`);

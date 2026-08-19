@@ -12,6 +12,7 @@
 //   node recorder/schedule-baseline.js              # yesterday and today
 //   node recorder/schedule-baseline.js 2026-08-18
 //   node recorder/schedule-baseline.js 2026-08-14 2026-08-19
+//   node recorder/schedule-baseline.js 2026-08-18 --rebuild
 
 import fs from 'fs';
 import path from 'path';
@@ -101,8 +102,28 @@ async function loadFeed() {
   };
 }
 
-async function buildDate(supabase, feedData, isoDate) {
+async function buildDate(supabase, feedData, isoDate, { rebuild = false } = {}) {
   const { routes, feed } = feedData;
+
+  // NTA republishes the static feed continuously, and a republished feed revises the past:
+  // the 2026-08-18 archive scheduled 24,412 trips for that Tuesday, and the archive
+  // published at 22:18 that night scheduled 24,619 for the same day. Rebuilding from the
+  // newer one would move a denominator that has already been measured against, which is
+  // the one thing this table exists to prevent. A date built from a different feed version
+  // is therefore left alone unless a rebuild is asked for explicitly.
+  const { data: existing } = await supabase
+    .from('schedule_baseline_runs')
+    .select('feed_version, scheduled_trips, built_at')
+    .eq('service_date', isoDate)
+    .maybeSingle();
+
+  if (existing && existing.feed_version !== feed.version && !rebuild) {
+    console.log(
+      `  ${isoDate}: keeping the baseline built from feed ${existing.feed_version} ` +
+      `(${existing.scheduled_trips} trips); this feed is ${feed.version}. Pass --rebuild to replace it.`
+    );
+    return true;
+  }
 
   // A feed cannot describe a date outside its own validity window. Building anyway would
   // silently produce a baseline for the wrong timetable, which is worse than none.
@@ -186,12 +207,13 @@ async function main() {
   const supabase = createClient(requireEnv('SUPABASE_URL'), requireEnv('SUPABASE_KEY'));
   const dates = datesFromArgs(process.argv.slice(2));
 
+  const rebuild = process.argv.includes('--rebuild');
   const feedData = await loadFeed();
   console.log(`Static feed ${feedData.feed.version || '(unversioned)'}, valid ${feedData.feed.startDate}..${feedData.feed.endDate}`);
-  console.log(`Building baseline for ${dates.length} date(s):`);
+  console.log(`Building baseline for ${dates.length} date(s)${rebuild ? ', replacing any existing baseline' : ''}:`);
 
   let built = 0;
-  for (const d of dates) if (await buildDate(supabase, feedData, d)) built++;
+  for (const d of dates) if (await buildDate(supabase, feedData, d, { rebuild })) built++;
 
   if (built === 0) {
     console.error('No baselines written.');
