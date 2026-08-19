@@ -1,24 +1,33 @@
 # Route health recorder, running free on GitHub Actions.
 #
-# The proper home for this is a small always-on worker, where it polls every 25s
-# continuously. This is the zero-cost stand-in: a scheduled job that polls for most of
-# each five-minute window, then flushes and exits.
+# WHY LONG RUNS RATHER THAN A FREQUENT CRON
 #
-# What that costs in quality, stated plainly:
-#   - GitHub's scheduled runners are best-effort and can be delayed by 10+ minutes under
-#     load, so coverage has gaps. `feed_polls` records exactly when we were and were not
-#     watching, which is why that table exists.
-#   - Roughly 10 polls per window rather than a continuous 25s cadence.
+# This used to be a `*/5` cron polling for 260 seconds per run. GitHub does not honour a
+# five-minute schedule: measured over 2026-08-17 and 2026-08-18 the real interval was 25 to
+# 30 minutes, with a worst gap of 77 minutes. That produced 421 successful polls a day and
+# 13.7% of the day actually watched, which is the single biggest limit on what the data can
+# say. Non-appearance in particular stays an upper bound rather than a ghost rate while
+# most of the day is unobserved.
 #
-# It is enough to start accruing daily punctuality, which is the point: the feed has no
-# historical archive, so imperfect recording now beats perfect recording later.
+# A GitHub-hosted job may run for six hours, and Actions minutes are free on public
+# repositories. Four long runs therefore cover a whole day continuously at no cost, which
+# is roughly eight times the polls and near-total coverage.
+#
+# Each run polls for 5h55m and exits cleanly, five minutes short of the six-hour ceiling so
+# the recorder flushes its buffer rather than being killed mid-window. The next run is
+# scheduled on the hour it would start anyway; `concurrency` holds it until the outgoing
+# run exits, so handover is continuous rather than overlapping. Overlap would not corrupt
+# anything — the poller lease permits exactly one — but it would waste a runner.
+#
+# `recorder-standby.yml` covers the case this cannot: a run that dies early, or a schedule
+# GitHub skips entirely. Without it a single missed trigger would be a six-hour hole.
 
 name: Route health recorder
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
-  workflow_dispatch:      # lets you trigger a run by hand to test
+    - cron: '0 0,6,12,18 * * *'
+  workflow_dispatch:
 
 concurrency:
   group: recorder
@@ -27,12 +36,12 @@ concurrency:
 jobs:
   record:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 358      # 5h58m: the run stops itself at 5h55m, this is the backstop
     steps:
       - uses: actions/checkout@v4
 
       # routes.txt is all the recorder needs and it is only ~41 KB, but it comes out of a
-      # 187 MB archive. Cache it weekly rather than downloading it every five minutes.
+      # 169 MB archive. Cache it weekly rather than downloading it on every run.
       - id: cache-static
         uses: actions/cache@v4
         with:
@@ -66,4 +75,4 @@ jobs:
           TFI_TRIP_UPDATES_URL: https://api.nationaltransport.ie/gtfsr/v2/TripUpdates
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: node recorder/recorder.js --duration 260
+        run: node recorder/recorder.js --duration 21300
