@@ -234,6 +234,138 @@ app.get('/stops/:id/arrivals', async (req) => {
     };
 });
 
+// 2b. THE PUBLIC RELIABILITY RECORD
+//
+// This is the part that does not exist anywhere else. NTA publishes reliability as
+// quarterly PDFs of operator-reported Lost Kilometre Rate, aggregated to the operator.
+// Nothing published anywhere says how a single route, or a single stop, actually performed
+// yesterday.
+//
+// Everything below is served from the rollup tables, which apply three rules before a
+// figure is allowed out: the denominator travels with the score, nothing is scored below
+// its sample threshold, and nothing is scored for an operator whose realtime feed we have
+// never seen. The `scoreable` and `withheld_reason` fields carry that decision to the
+// client rather than leaving it to guess why a percentage is null.
+
+const clampDays = (v, fallback = 7) => {
+    const n = parseInt(v, 10);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(Math.max(n, 1), 90);
+};
+
+// What is measurable at all, and how much of the day we were watching.
+//
+// Served as a first-class endpoint rather than buried in a footnote because it is the
+// honest scope of everything else here: on a typical day one operator in seven publishes a
+// realtime feed, covering about four scheduled trips in five.
+app.get('/reliability/coverage', async (req) => {
+    const date = req.query.date || serviceDateFor();
+
+    const [{ data: agencies }, { data: watch }] = await Promise.all([
+        supabase
+            .from('agency_coverage_daily')
+            .select('agency_id, scheduled_trips, scheduled_routes, observed_trips, observed_routes, publishes_realtime, trip_ids_joinable')
+            .eq('service_date', date)
+            .order('scheduled_trips', { ascending: false }),
+        supabase
+            .from('poll_coverage_daily')
+            .select('polls, watched_pct, longest_gap_seconds, median_gap_seconds')
+            .eq('service_date', date)
+            .maybeSingle(),
+    ]);
+
+    const rows = agencies || [];
+    const covered = rows.filter(a => a.publishes_realtime);
+    const total = (xs, k) => xs.reduce((s, a) => s + (a[k] || 0), 0);
+
+    return {
+        service_date: date,
+        scheduled_trips: total(rows, 'scheduled_trips'),
+        measurable_trips: total(covered, 'scheduled_trips'),
+        operators_total: rows.length,
+        operators_publishing_realtime: covered.length,
+        watching: watch || null,
+        operators: rows,
+    };
+});
+
+// One route's record over a window.
+//
+// The route id is the raw feed id and contains spaces, so it is a query parameter rather
+// than a path segment. The window figure is aggregated in SQL from event counts; it is
+// deliberately not derived from the per-day percentages below it, because a day whose
+// sample fell under the threshold has no percentage to contribute and would silently
+// enter the average as a zero.
+app.get('/reliability/route', async (req) => {
+    const routeId = req.query.id;
+    if (!routeId) return { error: 'id is required (the raw feed route_id)' };
+    const days = clampDays(req.query.days);
+    const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+
+    const [{ data: summary, error: summaryError }, { data: daily }] = await Promise.all([
+        supabase.rpc('route_reliability_summary', { p_route_id: routeId, days }),
+        supabase
+            .from('route_health_public')
+            .select('*')
+            .eq('route_id', routeId)
+            .gte('service_date', since)
+            .order('service_date', { ascending: false }),
+    ]);
+
+    if (summaryError) return { error: summaryError.message };
+
+    const s = (summary || [])[0];
+    if (!s) return { route_id: routeId, window_days: days, days_measured: 0, withheld_reason: 'no data for this route', days: [] };
+
+    return { ...s, window_days: days, days: daily || [] };
+});
+
+// One stop's record, per route serving it.
+//
+// A route can run well on one leg and badly on another, and a passenger only ever
+// experiences the stop they are standing at. This is the per-stop, per-route view that
+// exists nowhere else: NTA publishes reliability aggregated to the operator, quarterly.
+app.get('/stops/:id/health', async (req) => {
+    const days = clampDays(req.query.days);
+    const { data, error } = await supabase.rpc('stop_reliability_window', {
+        p_stop_id: req.params.id,
+        days,
+    });
+    if (error) return { error: error.message };
+
+    const routes = data || [];
+    return {
+        stop_id: req.params.id,
+        window_days: days,
+        routes_measured: routes.filter(r => r.meets_threshold).length,
+        routes,
+    };
+});
+
+// The worst routes in the country over a window.
+//
+// The growth engine: this is the query a local newspaper, a councillor or a commuter
+// actually wants, and nobody can currently answer it. Sorted worst-first because a
+// reliability record that opens with the best-performing routes is a press release.
+app.get('/reliability/worst', async (req) => {
+    const days = clampDays(req.query.days);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 25, 1), 200);
+    const mode = req.query.mode || null;
+
+    const { data, error } = await supabase.rpc('route_reliability_window', { days });
+    if (error) return { error: error.message };
+
+    const rows = (data || []).filter(r => !mode || r.mode === mode);
+
+    return {
+        window_days: days,
+        mode: mode,
+        routes_measured: rows.length,
+        note: 'Scored routes only. Operators publishing no realtime feed, and routes below the sample threshold, are absent by design rather than ranked last.',
+        routes: rows.slice(0, limit),
+    };
+});
+
 // 3. SEARCH
 app.get('/stops/search', async (req) => {
     const q = (req.query.q || '').toLowerCase();
