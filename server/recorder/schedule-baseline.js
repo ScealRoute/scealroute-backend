@@ -13,6 +13,14 @@
 //   node recorder/schedule-baseline.js 2026-08-18
 //   node recorder/schedule-baseline.js 2026-08-14 2026-08-19
 //   node recorder/schedule-baseline.js 2026-08-18 --rebuild
+//
+// Trips are given a scheduled time window when stop_times.txt is present, which is what
+// makes an unobserved trip interrogable rather than merely counted: a miss at 05:40 and a
+// miss at 13:00 are different claims. It is optional because that one file is 500 MB and
+// the rest of the feed is 25 MB, so a run without it still produces a correct baseline,
+// just one that cannot be questioned about time of day. Run fetch-static.js
+// --with-stop-times to have it, or attach-trip-times.js to add times to a baseline after
+// the fact.
 
 import fs from 'fs';
 import path from 'path';
@@ -21,6 +29,7 @@ import { fileURLToPath } from 'url';
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 import { requireEnv } from './env.js';
+import { loadTripTimes, stopTimesAvailable } from './trip-times.js';
 
 dotenv.config();
 
@@ -102,7 +111,7 @@ async function loadFeed() {
   };
 }
 
-async function buildDate(supabase, feedData, isoDate, { rebuild = false } = {}) {
+async function buildDate(supabase, feedData, isoDate, { rebuild = false, tripTimes = null } = {}) {
   const { routes, feed } = feedData;
 
   // NTA republishes the static feed continuously, and a republished feed revises the past:
@@ -141,12 +150,15 @@ async function buildDate(supabase, feedData, isoDate, { rebuild = false } = {}) 
   const rows = [];
   const routeIds = new Set();
   let unknownRoute = 0;
+  let timed = 0;
 
   await readCsv('trips.txt', (t) => {
     if (!t.trip_id || !t.route_id || !active.has(t.service_id)) return;
     const r = routes.get(t.route_id);
     if (!r) unknownRoute++;
     routeIds.add(t.route_id);
+    const span = tripTimes?.get(t.trip_id) ?? null;
+    if (span) timed++;
     rows.push({
       service_date: isoDate,
       trip_id: t.trip_id,
@@ -154,6 +166,8 @@ async function buildDate(supabase, feedData, isoDate, { rebuild = false } = {}) 
       agency_id: r?.agencyId ?? null,
       route_short_name: r?.shortName ?? null,
       mode: r?.mode ?? null,
+      first_departure_sec: span?.first ?? null,
+      last_arrival_sec: span?.last ?? null,
     });
   });
 
@@ -175,11 +189,16 @@ async function buildDate(supabase, feedData, isoDate, { rebuild = false } = {}) 
     scheduled_trips: rows.length,
     scheduled_routes: routeIds.size,
     built_at: new Date().toISOString(),
+    // Null rather than this feed's version when no times were attached, so that a baseline
+    // without times is distinguishable from one whose times came from this feed.
+    times_feed_version: tripTimes ? feed.version : null,
+    trips_with_times: tripTimes ? timed : null,
   });
   if (runError) throw new Error(`recording run for ${isoDate}: ${runError.message}`);
 
   console.log(
     `  ${isoDate}: ${rows.length} trips, ${routeIds.size} routes, ${active.size} services` +
+    (tripTimes ? `, ${timed} timed` : ', untimed') +
     (unknownRoute ? ` (${unknownRoute} trips on routes absent from routes.txt)` : '')
   );
   return true;
@@ -210,10 +229,22 @@ async function main() {
   const rebuild = process.argv.includes('--rebuild');
   const feedData = await loadFeed();
   console.log(`Static feed ${feedData.feed.version || '(unversioned)'}, valid ${feedData.feed.startDate}..${feedData.feed.endDate}`);
+
+  // Read once for every date rather than per date: the file is 10 million rows, and the
+  // times belong to the trip, not to the day it runs on.
+  let tripTimes = null;
+  if (stopTimesAvailable()) {
+    const { times, lines, malformed } = await loadTripTimes();
+    tripTimes = times;
+    console.log(`Trip times from ${lines.toLocaleString()} stop_times rows, ${times.size.toLocaleString()} trips` + (malformed ? `, ${malformed} unparseable` : ''));
+  } else {
+    console.log('No stop_times.txt on disk; baselines will have no time windows.');
+  }
+
   console.log(`Building baseline for ${dates.length} date(s)${rebuild ? ', replacing any existing baseline' : ''}:`);
 
   let built = 0;
-  for (const d of dates) if (await buildDate(supabase, feedData, d, { rebuild })) built++;
+  for (const d of dates) if (await buildDate(supabase, feedData, d, { rebuild, tripTimes })) built++;
 
   if (built === 0) {
     console.error('No baselines written.');
