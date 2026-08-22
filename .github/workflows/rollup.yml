@@ -60,9 +60,15 @@ jobs:
       # The baseline is the denominator, so it must come from a current feed. Fetched fresh
       # rather than cached: NTA republishes continuously, and a baseline built from a stale
       # timetable is a denominator for a service pattern that was not running.
+      #
+      # --with-stop-times costs almost nothing here and buys the time window on every trip.
+      # The 183 MB archive is downloaded either way; the flag only changes which files are
+      # extracted from it, adding a 500 MB write and a 3-second parse. Without it a day's
+      # baseline cannot be asked when its unobserved trips were scheduled, which is the
+      # question that decides whether a missing trip is evidence of anything.
       - name: Fetch static feed
         working-directory: server
-        run: node recorder/fetch-static.js
+        run: node recorder/fetch-static.js --with-stop-times
 
       - name: Build schedule baseline
         working-directory: server
