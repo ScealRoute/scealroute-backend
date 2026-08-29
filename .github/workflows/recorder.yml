@@ -21,6 +21,25 @@
 #
 # `recorder-standby.yml` covers the case this cannot: a run that dies early, or a schedule
 # GitHub skips entirely. Without it a single missed trigger would be a six-hour hole.
+#
+# WHY EACH RUN STARTS THE NEXT ONE
+#
+# Because the schedule above stopped arriving. Between 27 and 29 August 2026 GitHub
+# delivered two of the four daily triggers, and watch time fell from 96.7% to 42.3% with a
+# longest blind spot of 7h24m. The standby is on a */15 cron, which is 96 triggers a day,
+# and it was delivered about three times a day, so the safety net failed in exactly the same
+# way as the thing it was protecting. The record then reported the hole as a service
+# collapse: every operator appeared to fall together, Dublin Bus from 100% to 38.5%.
+#
+# A cron is a request. A chain is not: each run dispatches its successor as it exits, so
+# continuity depends on the previous run finishing rather than on GitHub's scheduler being
+# in a good mood. The cron stays as a cold start for when the chain is broken, and the
+# standby stays as the recovery path.
+#
+# This needs a PAT in `RECORDER_CHAIN_TOKEN`. The built-in GITHUB_TOKEN deliberately cannot
+# trigger another workflow run, which is how GitHub prevents workflows looping forever, so
+# a dispatch made with it is accepted and then silently produces no run. Without the secret
+# this step warns and falls back to the cron.
 
 name: Route health recorder
 
@@ -68,6 +87,10 @@ jobs:
             echo "Using cached static feed ($(wc -l < gtfs/static/routes.txt) routes)"
           fi
 
+      # Read back by the chain step. A run that dies on startup must not start another.
+      - name: Stamp start time
+        run: echo "RUN_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Record
         working-directory: server
         env:
@@ -76,3 +99,31 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: node recorder/recorder.js --duration 21300
+
+      # `always()` so a crashed run still hands over. The whole point is that the chain
+      # survives the failure of any single link, and a run that fails after five hours has
+      # still earned its successor.
+      - name: Start the next run
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.RECORDER_CHAIN_TOKEN }}
+        run: |
+          elapsed=$(( $(date +%s) - RUN_STARTED ))
+
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::RECORDER_CHAIN_TOKEN is not set, so this run cannot start the next one. Falling back to the cron, which is what stopped being delivered."
+            exit 0
+          fi
+
+          # The guard that makes chaining safe. If a run fails immediately, chaining would
+          # spawn another that fails immediately, forever. Ten minutes is far below a
+          # healthy run of 5h55m and far above any plausible startup crash, so a real run
+          # always chains and a broken one never does. Recovery then falls to the cron and
+          # the standby, which is what they are for.
+          if [ "$elapsed" -lt 600 ]; then
+            echo "::warning::Ran for ${elapsed}s, under the 600s minimum. Not chaining, so a fast-failing run cannot loop. The cron and the standby will recover."
+            exit 0
+          fi
+
+          echo "Ran for ${elapsed}s. Dispatching the next run."
+          gh workflow run recorder.yml --repo "$GITHUB_REPOSITORY"
