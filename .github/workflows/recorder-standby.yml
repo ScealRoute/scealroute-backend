@@ -6,10 +6,17 @@
 # archive: a poll missed is data lost permanently, which is the whole reason this project
 # records at all.
 #
-# This runs every fifteen minutes and asks one question: is anyone polling? The poller
-# lease answers it atomically. If the primary is alive this exits within seconds having
-# done nothing, which is the common case and costs almost nothing. If the primary is gone,
-# this takes the lease and records until the next primary run reclaims it.
+# This runs hourly and asks one question: is anyone polling? The poller lease answers it
+# atomically. If the primary is alive this exits within seconds having done nothing, which
+# is the common case and costs almost nothing. If the primary is gone, this takes the lease
+# and records until the next primary run reclaims it.
+#
+# It was */15 until 2026-08-29, which is 96 triggers a day. GitHub delivered roughly three,
+# so the fifteen-minute promise was fiction and the real recovery latency was closer to
+# eleven hours. Asking hourly is asking for something GitHub might actually deliver, and it
+# takes pressure off a schedule quota that the primary also depends on. The primary now
+# chains its own runs, so this is the cold-start and disaster path rather than the routine
+# one, and an hour of latency on that path is the honest trade.
 #
 # It must NOT share a concurrency group with the primary. Queued behind a six-hour job it
 # would never run, which is precisely when it is needed.
@@ -18,7 +25,7 @@ name: Recorder standby
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '0 * * * *'
   workflow_dispatch:
 
 concurrency:
